@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=75,<80"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bus-pulse"
+version = "0.1.0"
+description = "Streaming analytics and agentic transit intelligence for simulated Bengaluru buses"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+  "fastapi==0.115.12",
+  "uvicorn[standard]==0.34.2",
+  "pydantic==2.11.4",
+  "pydantic-settings==2.9.1",
+  "orjson==3.10.18",
+  "PyYAML==6.0.2",
+  "psycopg[binary,pool]==3.2.9",
+  "confluent-kafka==2.10.0",
+  "lightgbm==4.6.0",
+  "numpy==2.2.6",
+  "pandas==2.2.3",
+  "scikit-learn==1.6.1",
+  "langgraph==0.4.5",
+  "langchain-core==0.3.60",
+  "langchain-groq==0.3.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==8.3.5", "ruff==0.11.10", "httpx==0.28.1"]
+
+[tool.setuptools.packages.find]
+where = ["backend/src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["backend/src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"

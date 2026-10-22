@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f4f7fb">
+  <title>Bus Pulse · Bengaluru</title>
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.6.2/dist/maplibre-gl.css">
+  <link rel="stylesheet" href="/assets/styles.css">
+  <link rel="stylesheet" href="/assets/components.css">
+  <link rel="stylesheet" href="/assets/journey.css">
+  <link rel="stylesheet" href="/assets/overrides.css?v=20261022-ws-chunks">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/"><span class="brand-mark">BP</span><span>Bus Pulse<small>BENGLURU · TRANSIT INTELLIGENCE</small></span></a>
+    <div class="top-status"><span class="pulse"></span><span id="system-status">Connecting to stream…</span></div>
+    <nav class="role-switch" aria-label="Dashboard">
+      <button class="role-button selected" data-view="commuter">Commuter</button>
+      <button class="role-button" data-view="admin" hidden>Administrator</button>
+      <span id="signed-in-user" class="signed-in-user"></span>
+      <a id="logout-button" class="logout-button" href="/api/auth/logout">Sign out</a>
+    </nav>
+  </header>
+
+  <main>
+    <section id="commuter-view" class="dashboard-view">
+      <div class="page-heading">
+        <div><p class="eyebrow">BENGALURU · BMTC NETWORK</p><h1>Your next bus, at a glance.</h1><p class="muted">Choose your start and destination to find routes and their moving buses.</p></div>
+        <div class="search-box"><span>⌕</span><input id="route-search" placeholder="Search BMTC route number or name" autocomplete="off"><button id="search-button">Search</button></div>
+      </div>
+      <div id="commuter-simulation-banner" class="simulation-banner" role="status"><i></i><span>Checking the administrator’s active simulation…</span></div>
+      <div class="journey-controls">
+        <div class="journey-point"><button id="choose-start" class="journey-stop-button"><span class="journey-icon start-icon">A</span><span><small>START</small><b id="start-stop-label">Choose starting stop</b></span><span class="journey-chevron">⌄</span></button><button class="map-pick-button" data-map-pick="start">Pick on map</button></div>
+        <div class="journey-connector"></div>
+        <div class="journey-point"><button id="choose-destination" class="journey-stop-button"><span class="journey-icon destination-icon">B</span><span><small>DESTINATION</small><b id="destination-stop-label">Choose destination stop</b></span><span class="journey-chevron">⌄</span></button><button class="map-pick-button" data-map-pick="destination">Pick on map</button></div>
+        <button id="find-journey" class="journey-find-button">Find routes</button>
+        <span id="map-pick-feedback" class="map-pick-feedback" role="status"></span>
+        <div class="gps-entry-row"><label>Start coordinates<input id="start-coordinates" inputmode="decimal" placeholder="12.9716, 77.5946" aria-label="Start latitude, longitude"></label><label>Destination coordinates<input id="destination-coordinates" inputmode="decimal" placeholder="12.9820, 77.6400" aria-label="Destination latitude, longitude"></label><small>Enter latitude, longitude. Bus Pulse matches each point to its nearest GTFS stop.</small></div>
+        <section id="stop-picker" class="stop-picker" hidden><div class="stop-picker-heading"><div><small id="picker-title">SELECT A STOP</small><b>Where would you like to board?</b></div><button id="close-stop-picker" class="ghost-button" type="button">Close</button></div><input id="stop-search" type="search" placeholder="Search Bengaluru stops" autocomplete="off"><div id="stop-results" class="stop-results"><p class="empty-state">Type at least two characters to search stops.</p></div></section>
+      </div>
+      <section class="commuter-simulation panel" aria-labelledby="commuter-simulation-title">
+        <div class="commuter-simulation-heading"><div><p class="eyebrow">ROUTE DEMO</p><h2 id="commuter-simulation-title">Simulate buses for your route</h2><p id="commuter-demo-route" class="muted">Choose a simulated route from the results below.</p></div><span class="badge soft">Demo fleet · 1–25 buses</span></div>
+        <div class="commuter-simulation-controls">
+          <label class="commuter-bus-count" for="commuter-bus-count">Buses on route<input id="commuter-bus-count" type="number" min="1" max="25" value="2" inputmode="numeric"></label>
+          <div class="commuter-scenario-picker" role="group" aria-label="Crowding scenario">
+            <span>Demand</span>
+            <button type="button" class="commuter-scenario active" data-commuter-profile="normal">Normal</button>
+            <button type="button" class="commuter-scenario" data-commuter-profile="moderate">Moderate</button>
+            <button type="button" class="commuter-scenario" data-commuter-profile="high">High</button>
+          </div>
+          <button id="commuter-run-demo" class="primary-button" type="button" disabled>Run route simulation</button>
+        </div>
+        <p id="commuter-demo-feedback" class="commuter-demo-feedback" role="status">Select a simulated route to enable the demo. Starting it changes the shared synthetic fleet for the selected region.</p>
+      </section>
+      <div class="commuter-layout">
+        <div class="map-card">
+          <div class="map-toolbar"><span class="map-label"><i class="dot dot-live"></i> Selected route only</span><b id="map-route-name" class="map-route-name">Choose a route to view it</b><span class="map-legend"><i class="dot low"></i> Low <i class="dot medium"></i> Moderate <i class="dot full"></i> Full</span></div>
+          <div id="commuter-map" class="map"></div>
+          <div id="map-fallback" class="map-fallback" hidden>Map tiles are unavailable. Bus routes and stops remain available in the panels.</div>
+        </div>
+        <aside class="side-column">
+          <section class="panel route-panel"><div class="panel-heading"><div><p class="eyebrow">YOUR JOURNEY</p><h2 id="route-panel-title">Choose a route</h2></div><div class="route-panel-tools"><span id="route-count" class="count-pill">— routes</span><button id="change-trip" class="ghost-button" type="button">Change trip</button></div></div><div class="journey-sort" role="group" aria-label="Sort journey options"><button data-sort="fastest" class="selected">Fastest</button><button data-sort="nearest">Nearest bus</button></div><div id="route-results" class="route-results"><p class="empty-state">Choose start and destination stops, or search for a route number.</p></div></section>
+          <section class="panel bus-panel"><div class="panel-heading"><div><p class="eyebrow">SELECTED BUS</p><h2 id="bus-title">Select a bus</h2></div><span id="bus-crowd" class="badge neutral">No live data</span></div><div id="bus-detail" class="bus-detail"><p class="empty-state">Choose a moving bus on the map or from a route card.</p></div></section>
+          <section class="panel chat-panel"><div class="panel-heading"><div><p class="eyebrow">TRANSIT ASSISTANT</p><h2>Ask Bus Pulse</h2></div><span class="badge soft">Live simulation context</span></div><p class="assistant-hint">Answers use the active region and latest simulated bus snapshots.</p><div class="assistant-prompts"><button data-ask="What's the status of buses?">Bus status</button><button data-ask="Which bus is least crowded?">Least crowded</button><button data-ask="Should I wait for the next bus?">Should I wait?</button></div><div id="chat-messages" class="chat-messages"><p class="assistant-message">Ask about a bus ID, route crowding, your nearest bus, or whether waiting looks worthwhile. I’ll tell you when the simulation has no current data.</p></div><form id="chat-form" class="chat-form"><input id="chat-input" placeholder="What’s the status of the buses?" autocomplete="off"><button aria-label="Send">↑</button></form></section>
+        </aside>
+      </div>
+    </section>
+
+    <section id="admin-view" class="dashboard-view" hidden>
+      <div class="page-heading admin-heading"><div><p class="eyebrow">OPERATIONS CONSOLE</p><h1>Simulation control room</h1><p class="muted">Manage a synthetic fleet and monitor the streaming pipeline. No control command dispatches a real bus. <span class="extra-bus-key">◇ Advisory-added bus</span></p></div></div>
+      <div class="admin-grid">
+        <section class="panel control-panel"><div class="panel-heading"><div><p class="eyebrow">SIMULATOR</p><h2>Fleet and scenario</h2></div><span id="sim-state" class="badge neutral">Not connected</span></div>
+          <div class="simulation-toolbar"><div class="control-row" role="group" aria-label="Simulation controls"><button class="primary-button" data-action="start">Start</button><button class="secondary-button" data-action="pause">Pause</button><button class="secondary-button" data-action="reset">Reset</button><button class="scenario-button" data-action="normal_hours">Normal Hours</button><button class="scenario-button" data-action="moderate_hours">Moderate Hours</button><button class="scenario-button" data-action="rush_hour">Rush Hour Demo</button></div><div id="simulation-pulse" class="simulation-pulse-tab paused" role="status"><i></i><span><b>Pulse</b><small>Simulation paused</small></span></div></div>
+          <div class="simulation-region-row"><label for="simulation-region">Simulation area</label><select id="simulation-region"><option value="whole_city">Whole Bengaluru</option><option value="central">Central Bengaluru</option><option value="north">North Bengaluru</option><option value="east">East Bengaluru · Whitefield</option><option value="south">South Bengaluru</option><option value="west">West Bengaluru</option><option value="orr">Outer Ring Road corridor</option></select><small id="scenario-note">Rush-hour demo boosts synthetic boarding at major hubs and during commute peaks.</small></div>
+          <details class="demo-guide"><summary>Suggested demo cases</summary><ol><li><b>Whitefield commute:</b> choose East · Whitefield, Start, then find a commuter route from Hope Farm toward Majestic.</li><li><b>Evening rush on ORR:</b> choose Outer Ring Road corridor and click Rush Hour Demo; watch crowding, arrivals, and the Pulse indicator.</li><li><b>Citywide operations:</b> choose Whole Bengaluru, Start, then filter route fleet and compare stream health and active alerts.</li></ol><small>All bus positions, passenger counts, and rush-hour demand are synthetic.</small></details>
+          <div class="speed-row"><span>Simulation speed</span><button class="speed-button active" data-speed="1">1×</button><button class="speed-button" data-speed="5">5×</button><span class="muted">Fixed event-time speed</span></div>
+      <div class="fleet-toolbar"><div><h3>Region route fleet</h3><p class="muted">Fleet size follows route length; isolated lines get two buses. Total is capped.</p></div><div><span id="fleet-total">0</span><span class="muted"> / <span id="fleet-limit">4000</span> buses</span></div></div>
+          <div class="fleet-search"><input id="fleet-filter" placeholder="Filter routes by number or name"><button id="load-fleet">Load usable routes</button></div>
+          <div class="fleet-table-wrap"><table class="fleet-table"><thead><tr><th>Route</th><th>GTFS geometry</th><th>Live buses</th><th>Set buses</th></tr></thead><tbody id="fleet-rows"><tr><td colspan="4" class="empty-state">Unlock the administrator view to load routes.</td></tr></tbody></table></div>
+          <div class="control-footer"><button id="apply-fleet" class="primary-button">Apply fleet counts</button><span id="control-feedback" class="muted">Commands are audited and acknowledged by the simulator.</span></div>
+        </section>
+        <aside class="admin-side">
+          <section class="panel"><div class="panel-heading"><div><p class="eyebrow">STREAM HEALTH</p><h2>Pipeline status</h2></div><span id="pipeline-badge" class="badge neutral">Waiting</span></div><div class="metric-grid"><div class="metric"><small>Usable routes</small><b id="metric-routes">—</b></div><div class="metric"><small>Live simulated buses</small><b id="metric-buses">0</b></div><div class="metric"><small>Window latency</small><b>60 s</b></div><div class="metric"><small>Kafka mode</small><b>KRaft · 3 partitions</b></div></div><div class="dq-summary"><h3>Data quality</h3><div><span>Malformed</span><b id="dq-malformed">0</b></div><div><span>Duplicates</span><b id="dq-duplicates">0</b></div><div><span>Late events</span><b id="dq-late">0</b></div></div></section>
+          <section class="panel operations-panel"><div class="panel-heading"><div><p class="eyebrow">OPERATIONS</p><h2>Active alerts</h2></div><span id="alert-count" class="count-pill">0 open</span></div><div id="admin-alerts" class="alert-list"><p class="empty-state">No active alerts. Solved alerts are cleared from this view.</p></div></section>
+          <section class="panel"><div class="panel-heading"><div><p class="eyebrow">AGENTIC AI</p><h2>Advisories</h2></div><span class="badge soft">Human approval</span></div><div id="admin-advisories" class="alert-list"><p class="empty-state">Unlock the administrator view to load evidence-backed recommendations.</p></div></section>
+          <section class="panel"><div class="panel-heading"><div><p class="eyebrow">FLEET REINFORCEMENT</p><h2>Approved extra buses</h2></div><span id="extra-bus-count" class="count-pill">0 tracked</span></div><div id="admin-extra-buses" class="extra-bus-list"><p class="empty-state">Approved advisory buses will appear here when their first Kafka snapshot arrives.</p></div><p id="extra-bus-track-status" class="simulation-note">Choose Track to focus the live map on an extra bus.</p></section>
+        </aside>
+      </div>
+      <div class="admin-map-card panel"><div class="panel-heading"><div><p class="eyebrow">LIVE FLEET</p><h2>Bus locations</h2></div><button id="admin-fit-map" class="ghost-button">Center region</button></div><div id="admin-map" class="map admin-map"></div></div>
+    </section>
+  </main>
+  <script src="https://unpkg.com/maplibre-gl@5.6.2/dist/maplibre-gl.js"></script>
+  <script type="module" src="/assets/app.js?v=20261022-map-fix-fleet-preserve"></script>
+</body>
+</html>

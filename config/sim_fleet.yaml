@@ -1,0 +1,5 @@
+# One synthetic bus per usable route in the screened GTFS network.
+all_usable_routes: true
+buses_per_route: 1
+minimum_per_route: 1
+routes: []

@@ -1,0 +1,17 @@
+window_seconds: 60
+allowed_lateness_seconds: 15
+overcrowd_threshold_pct: 85
+overcrowd_consecutive_windows: 2
+cep_rearm_below_pct: 80
+cep_cooldown_windows: 5
+predicted_overcrowd_threshold_pct: 85
+abnormal_change_points: 30
+prediction_horizon_minutes: 5
+spark:
+  master: "local[4]"
+  trigger: "1 second"
+  shuffle_partitions: 3
+  driver_memory: 1536m
+kafka:
+  partitions: 3
+  retention_hours: 1

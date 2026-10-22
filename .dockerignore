@@ -1,0 +1,15 @@
+.git
+.env
+.venv
+*.egg-info
+__pycache__
+*.py[cod]
+.pytest_cache
+data/blr/raw
+data/runtime
+models/*.txt
+models/*.meta.json
+reports/network_preview.html
+reports/*.csv
+reports/*.parquet
+checkpoints

@@ -1,0 +1,18 @@
+{
+  "route_count": 4434,
+  "usable_routes": 3633,
+  "direction_count": 7475,
+  "usable_directions": 6032,
+  "covered_stops": 8771,
+  "fail_reasons": {
+    "fewer_than_8_stops": 642,
+    "stop_order_mismatch": 98,
+    "shape_to_stops_length_ratio": 128,
+    "stop_outside_bengaluru_box": 130,
+    "shape_over_80_km": 63,
+    "stop_offset_over_100m": 19
+  },
+  "median_direction_p90_offset_m": 6.0,
+  "original_shape_points": 2515066,
+  "simplified_shape_points": 511469
+}

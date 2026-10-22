@@ -1,0 +1,25 @@
+{
+  "generated_at": "2026-10-21T18:49:00.752526+00:00",
+  "model": "LightGBMRegressor",
+  "horizon_minutes": 5,
+  "rows": 320,
+  "train_rows": 260,
+  "validation_rows": 60,
+  "split": "temporal 80/20",
+  "features": [
+    "occ_mean",
+    "occ_max",
+    "n_events",
+    "prev_occ_mean",
+    "route_mean_pct",
+    "hour_sin",
+    "hour_cos"
+  ],
+  "mae_pct_points": {
+    "lightgbm": 5.995408008618791,
+    "persistence": 10.723391666666666,
+    "linear": 8.778262829209478
+  },
+  "trained_through": "2026-10-21T18:41:00+00:00",
+  "validated_from": "2026-10-21T18:42:00+00:00"
+}

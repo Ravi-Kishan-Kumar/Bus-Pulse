@@ -1,0 +1,19 @@
+# Local credentials and machine-specific configuration.
+# Keep the safe template versioned for setup instructions.
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+*.egg-info/
+data/blr/raw/*
+!data/blr/raw/.gitkeep
+data/runtime/
+checkpoints/
+reports/*.tmp
+reports/*.csv
+reports/*.parquet
+*.log
+*.jfr

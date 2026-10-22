@@ -1,0 +1,47 @@
+{
+  "feed": "mdb-2595",
+  "feed_version": "20260907",
+  "service_start_date": "20260907",
+  "service_end_date": "20270907",
+  "sha256": "b5fe4a8e05495f719e4c8f16452dc6c4820f342b5414c3fb51e19687b5ea3333",
+  "producer_url": "https://github.com/Vonter/bmtc-gtfs",
+  "attributions": [
+    {
+      "attribution_id": "bmtc",
+      "organization_name": "Bengaluru Metropolitan Transport Corporation",
+      "is_producer": "",
+      "is_operator": "1",
+      "is_authority": "1",
+      "attribution_url": "https://mybmtc.karnataka.gov.in/english"
+    },
+    {
+      "attribution_id": "vonter",
+      "organization_name": "Vonter",
+      "is_producer": "1",
+      "is_operator": "",
+      "is_authority": "",
+      "attribution_url": "https://www.github.com/Vonter/bmtc-gtfs"
+    }
+  ],
+  "source_license": "Open Database License (ODbL-1.0), as stated by feed producer; verify terms before redistribution",
+  "downloaded_at_utc": "2026-10-21T18:12:53.037777+00:00",
+  "route_quality": {
+    "route_count": 4434,
+    "usable_routes": 3633,
+    "direction_count": 7475,
+    "usable_directions": 6032,
+    "covered_stops": 8771,
+    "fail_reasons": {
+      "fewer_than_8_stops": 642,
+      "stop_order_mismatch": 98,
+      "shape_to_stops_length_ratio": 128,
+      "stop_outside_bengaluru_box": 130,
+      "shape_over_80_km": 63,
+      "stop_offset_over_100m": 19
+    },
+    "median_direction_p90_offset_m": 6.0,
+    "original_shape_points": 2515066,
+    "simplified_shape_points": 511469
+  },
+  "data_honesty": "Static route topology only. Passenger counts, vehicle positions, occupancy and incidents are simulated."
+}

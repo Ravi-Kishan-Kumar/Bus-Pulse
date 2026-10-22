@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f4f7fb">
+  <title>Sign in · Bus Pulse</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+  <link rel="stylesheet" href="/assets/components.css">
+  <link rel="stylesheet" href="/assets/login.css">
+  <link rel="stylesheet" href="/assets/overrides.css?v=20261022">
+</head>
+<body class="login-page">
+  <main class="login-shell">
+    <section class="login-brand"><a class="brand" href="/"><span class="brand-mark">BP</span><span>Bus Pulse<small>BENGALURU · TRANSIT INTELLIGENCE</small></span></a><div><p class="eyebrow">BENGALURU · BMTC NETWORK</p><h1>Move through the city with confidence.</h1><p>Live simulation, route insights, and smarter crowding decisions in one place.</p></div><small class="login-footnote">A transit intelligence simulation · No real buses are controlled</small></section>
+    <section class="login-card">
+      <p class="eyebrow">WELCOME TO BUS PULSE</p><h2>Sign in to continue</h2><p class="login-subtitle">Choose your workspace to get started.</p>
+      <div class="login-role-switch" role="tablist"><button class="login-role selected" data-role="commuter" role="tab">Commuter</button><button class="login-role" data-role="admin" role="tab">Administrator</button></div>
+      <form id="login-form" class="login-form">
+        <label for="username">Username</label><input id="username" name="username" autocomplete="username" minlength="3" required placeholder="Your username">
+        <label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required placeholder="Your password">
+        <div id="display-name-wrap"><label for="display-name">Name <span>(optional)</span></label><input id="display-name" name="display_name" autocomplete="name" placeholder="How should we address you?"></div>
+        <p id="auth-message" class="auth-message" aria-live="polite"></p>
+        <button id="submit-auth" class="login-submit" type="submit">Sign in as commuter</button>
+      </form>
+      <p id="register-prompt" class="register-prompt"><span id="register-copy">New to Bus Pulse?</span> <button id="register-button" type="button">Create commuter account</button></p>
+      <p id="admin-hint" class="admin-hint" hidden>Administrator credentials are configured by the operator in the project <code>.env</code> file.</p>
+    </section>
+  </main>
+  <script type="module" src="/assets/login.js?v=20261022"></script>
+</body>
+</html>
