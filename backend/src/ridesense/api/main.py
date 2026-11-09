@@ -552,6 +552,132 @@ def admin_advisory_buses(request: Request, region_id: str | None = Query(default
                 "updated_at": datetime.now(timezone.utc).isoformat(), "simulated": True}
 
 
+@app.get("/api/admin/kafka/overview")
+def admin_kafka_overview(request: Request):
+    require_admin(request)
+    with app.state.db.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) AS extra_bus_count FROM vehicle_latest WHERE advisory_extra=true AND updated_at>now()-(%s * interval '1 second')",
+            (BUS_LIVE_TTL_SECONDS,),
+        )
+        extra_count = cur.fetchone()["extra_bus_count"]
+        cur.execute("SELECT running,paused,demand_profile,region_id,total_buses,active_routes FROM simulation_status WHERE singleton_id=1")
+        sim = cur.fetchone() or {}
+        cur.execute(
+            "SELECT count(*) AS batch_count,max(ts) AS latest_batch,sum(events_in) AS total_events,sum(malformed) AS total_malformed,sum(duplicates) AS total_duplicates,sum(late_dropped) AS total_late,avg(throughput_eps) AS avg_eps,max(lateness_p95_s) AS p95_latency_s FROM dq_metrics WHERE ts>now()-interval '10 minutes'"
+        )
+        dq = cur.fetchone() or {}
+        cur.execute(
+            "SELECT count(*) AS alert_count,max(detected_at) AS latest_alert FROM alerts WHERE detected_at>now()-interval '10 minutes'"
+        )
+        alert_stats = cur.fetchone() or {}
+    topics = [
+        {"name": "vehicle-telemetry",   "partitions": 3, "key": "vehicle_id",  "retention": "1 hour", "purpose": "Raw GPS telemetry: position, speed, direction_id from every simulated bus"},
+        {"name": "occupancy-state",     "partitions": 3, "key": "vehicle_id",  "retention": "1 hour", "purpose": "Fused occupancy reading: seated, standing, support counts, occ_est_pct"},
+        {"name": "passenger-flow",      "partitions": 3, "key": "vehicle_id",  "retention": "1 hour", "purpose": "Per-stop boarding and alighting events at every terminal dwell"},
+        {"name": "window-aggregates",   "partitions": 3, "key": "route_id",    "retention": "1 hour", "purpose": "60-second tumbling window aggregations (avg/max occupancy) emitted by Spark"},
+        {"name": "predictions",         "partitions": 3, "key": "vehicle_id",  "retention": "1 hour", "purpose": "Spark ML crowding forecasts (gradient-boost model output)"},
+        {"name": "alerts",              "partitions": 3, "key": "route_id",    "retention": "1 hour", "purpose": "Real-time overcrowding anomaly alerts (OVERCROWD / PREDICTED_OVERCROWD)"},
+        {"name": "control",             "partitions": 1, "key": "simulator",   "retention": "1 hour", "purpose": "Strictly ordered FIFO administrative commands (set_fleet, rush_hour, pause…)"},
+    ]
+    pipeline_stages = [
+        {"stage": "1 · Simulator",         "component": "Fleet Simulator (Python)", "output_topic": "vehicle-telemetry + occupancy-state + passenger-flow", "tech": "confluent-kafka Producer"},
+        {"stage": "2 · Kafka KRaft Broker", "component": "Kafka 3.7 (KRaft mode, no ZooKeeper)", "output_topic": "7 topics, 3-partition fan-out", "tech": "KRaft consensus, orjson serialization"},
+        {"stage": "3 · Spark Streaming",   "component": "PySpark Structured Streaming 3.5", "output_topic": "window-aggregates + predictions + alerts", "tech": "60 s tumbling window, 30 s watermark"},
+        {"stage": "4 · TimescaleDB",        "component": "PostgreSQL + TimescaleDB hypertables", "output_topic": "occupancy_state, window_aggregates, vehicle_latest, alerts", "tech": "foreachBatch upsert, 1-hour retention"},
+        {"stage": "5 · FastAPI",            "component": "REST + WebSocket API", "output_topic": "→ Admin Dashboard + Commuter App", "tech": "psycopg3 connection pool, JWT sessions"},
+    ]
+    return {
+        "cluster": {
+            "mode": "KRaft (no ZooKeeper)",
+            "broker": os.getenv("KAFKA_BOOTSTRAP", "kafka:9092"),
+            "serialization": "JSON (orjson)",
+            "replication_factor": 1,
+            "total_topics": len(topics),
+        },
+        "topics": topics,
+        "pipeline_stages": pipeline_stages,
+        "partitioning_strategy": {
+            "key_field": "vehicle_id (telemetry/occupancy/predictions), route_id (window-aggregates/alerts), simulator (control)",
+            "algorithm": "murmur2 hash(key) mod partition_count",
+            "guarantee": "All events for the same vehicle_id land in the same partition, ensuring strict per-bus ordering without distributed coordination.",
+            "control_topic": "control uses 1 partition and key='simulator' for guaranteed FIFO delivery of set_fleet commands.",
+        },
+        "windowing": {
+            "type": "Tumbling (non-overlapping) window",
+            "size_seconds": 60,
+            "watermark_seconds": 30,
+            "trigger": "ProcessingTime 20s micro-batch",
+            "late_event_policy": "Dropped after watermark threshold (counted in dq_metrics.late_dropped)",
+        },
+        "live_metrics": {
+            "avg_throughput_eps": float(dq.get("avg_eps") or 0),
+            "p95_latency_s": float(dq.get("p95_latency_s") or 0),
+            "total_events_10min": int(dq.get("total_events") or 0),
+            "malformed_10min": int(dq.get("total_malformed") or 0),
+            "late_dropped_10min": int(dq.get("total_late") or 0),
+            "alerts_10min": int(alert_stats.get("alert_count") or 0),
+            "latest_batch": str(dq.get("latest_batch") or ""),
+            "latest_alert": str(alert_stats.get("latest_alert") or ""),
+        },
+        "simulation": {
+            "running": bool(sim.get("running")),
+            "paused": bool(sim.get("paused")),
+            "demand_profile": sim.get("demand_profile", "normal"),
+            "region_id": sim.get("region_id", "whole_city"),
+            "total_buses": int(sim.get("total_buses") or 0),
+            "active_routes": int(sim.get("active_routes") or 0),
+        },
+        "extra_buses": {
+            "active": int(extra_count),
+            "limit": 50,
+            "available_slots": max(0, 50 - int(extra_count)),
+        },
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get("/api/admin/kafka/messages")
+def admin_kafka_messages(request: Request, topic: str = Query(default="vehicle-telemetry", max_length=60), limit: int = Query(default=5, ge=1, le=20)):
+    require_admin(request)
+    allowed_topics = {"vehicle-telemetry", "occupancy-state", "passenger-flow", "window-aggregates", "predictions", "alerts", "control"}
+    if topic not in allowed_topics:
+        raise HTTPException(status_code=422, detail=f"Topic must be one of: {', '.join(sorted(allowed_topics))}")
+    # Pull latest rows from DB as a proxy for recent messages (Kafka consumer would need separate thread)
+    with app.state.db.connection() as conn, conn.cursor() as cur:
+        if topic == "vehicle-telemetry":
+            cur.execute("SELECT vehicle_id,route_id,region_id,direction_id,event_ts,lat,lon,progress_m,speed_mps,advisory_extra,updated_at FROM vehicle_latest ORDER BY updated_at DESC LIMIT %s", (limit,))
+            rows = cur.fetchall()
+            samples = [{"key": r["vehicle_id"], "topic": topic, "partition": abs(hash(r["vehicle_id"])) % 3,
+                        "payload": {k: v for k, v in r.items()}, "event_ts": str(r["event_ts"])} for r in rows]
+        elif topic in {"occupancy-state", "passenger-flow"}:
+            cur.execute("SELECT vehicle_id,route_id,region_id,event_ts,occ_est_pct,onboard_count,seated_count,standing_count,supported_standing_count,capacity,advisory_extra,updated_at FROM vehicle_latest ORDER BY updated_at DESC LIMIT %s", (limit,))
+            rows = cur.fetchall()
+            samples = [{"key": r["vehicle_id"], "topic": topic, "partition": abs(hash(r["vehicle_id"])) % 3,
+                        "payload": {k: v for k, v in r.items()}, "event_ts": str(r["event_ts"])} for r in rows]
+        elif topic == "window-aggregates":
+            cur.execute("SELECT route_id,window_start,window_end,avg_occ_pct,max_occ_pct,event_count,vehicle_count FROM window_aggregates ORDER BY window_end DESC LIMIT %s", (limit,))
+            rows = cur.fetchall()
+            samples = [{"key": r["route_id"], "topic": topic, "partition": abs(hash(str(r["route_id"]))) % 3,
+                        "payload": {k: str(v) if hasattr(v, 'isoformat') else v for k, v in r.items()}} for r in rows]
+        elif topic == "predictions":
+            cur.execute("SELECT vehicle_id,route_id,predicted_at,predicted_pct,window_start FROM predictions ORDER BY predicted_at DESC LIMIT %s", (limit,))
+            rows = cur.fetchall()
+            samples = [{"key": r["vehicle_id"], "topic": topic, "partition": abs(hash(r["vehicle_id"])) % 3,
+                        "payload": {k: str(v) if hasattr(v, 'isoformat') else v for k, v in r.items()}} for r in rows]
+        elif topic == "alerts":
+            cur.execute("SELECT event_id,route_id,vehicle_id,alert_type,severity,occ_pct,pred_pct,detected_at FROM alerts ORDER BY detected_at DESC LIMIT %s", (limit,))
+            rows = cur.fetchall()
+            samples = [{"key": r["route_id"], "topic": topic, "partition": abs(hash(str(r["route_id"]))) % 3,
+                        "payload": {k: str(v) if hasattr(v, 'isoformat') else v for k, v in r.items()}} for r in rows]
+        else:
+            # control topic - no DB mirror, return placeholder
+            samples = [{"key": "simulator", "topic": "control", "partition": 0,
+                        "payload": {"action": "set_fleet", "note": "Control commands are write-only; shown here as schema reference",
+                                    "schema": {"command_id": "uuid", "action": "set_fleet|start|pause|rush_hour|reset", "region_id": "str", "route_bus_counts": {"route_id": "int"}, "parameters": {"advisory_extra_route_id": "str (optional)"}}}}]
+    return {"topic": topic, "messages": samples, "count": len(samples), "note": "Messages are sampled from TimescaleDB mirrors of Kafka topics for display.", "updated_at": datetime.now(timezone.utc).isoformat()}
+
+
 @app.post("/api/admin/advisories/{advisory_id}/review")
 def review_advisory(advisory_id: str, body: dict,
                     request: Request):
@@ -581,6 +707,18 @@ def review_advisory(advisory_id: str, body: dict,
             region_id = simulation["region_id"] if simulation["region_id"] in route_regions else (route_regions[0] if route_regions else None)
             if not region_id:
                 raise HTTPException(status_code=409, detail="This route is not assigned to a supported simulation region")
+            # Enforce global extra-bus safety ceiling before allocating
+            MAX_EXTRA_BUSES = 50
+            cur.execute(
+                "SELECT count(*) AS cnt FROM vehicle_latest WHERE advisory_extra=true AND updated_at>now()-(%s * interval '1 second')",
+                (BUS_LIVE_TTL_SECONDS,),
+            )
+            extra_count = cur.fetchone()["cnt"]
+            if extra_count >= MAX_EXTRA_BUSES:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Reinforcement ceiling reached: {extra_count}/{MAX_EXTRA_BUSES} advisory buses are already active. Wait for some to expire before approving more.",
+                )
             routes, max_buses = _region_fleet_plan(cur, region_id)
             route_by_id = {str(route["route_id"]): route for route in routes}
             selected = route_by_id.get(str(advisory["route_id"]))

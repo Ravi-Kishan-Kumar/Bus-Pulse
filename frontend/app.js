@@ -3,7 +3,8 @@ const state = { maps: {}, mapAdmin: {}, buses: [], adminRoutes: [], user: null,
   pickerTarget: 'start', mapPickTarget: null, socket: null, pendingVehicleSnapshot: null, activeView: 'commuter', selectedBusId: null,
   lastBusRefresh: 0, regionId: 'whole_city', selectedRegion: 'whole_city', regionSelectionManual: false,
   regions: [], routeGeometry: {}, selectionMarkers: {}, journeySort: 'fastest', lastBusRender: 0, simulationRunning: false,
-  selectedRouteIds: [], journeyOptions: [], commuterDemandProfile: 'normal', extraBuses: [], trackedExtraBusId: null, advisoriesLoading: false };
+  selectedRouteIds: [], journeyOptions: [], commuterDemandProfile: 'normal', extraBuses: [], trackedExtraBusId: null, advisoriesLoading: false,
+  activeAdminTab: 'operations', kafkaOverview: null };
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 const crowd = (pct = 0) => pct < 50 ? 'Low' : pct < 70 ? 'Medium' : pct <= 85 ? 'High' : 'Full';
@@ -200,6 +201,19 @@ function setupMap(id, isAdmin = false) {
         layout: { 'icon-image': 'advisory-bus-diamond', 'icon-size': 0.82,
           'icon-allow-overlap': true, 'icon-ignore-placement': true },
       });
+      // Purple halo that makes the extra bus pop even when zoomed out
+      if (!map.getLayer('vehicle-advisory-halo')) map.addLayer({
+        id: 'vehicle-advisory-halo', type: 'circle', source: 'vehicle-points',
+        filter: ['==', ['get', 'advisory_extra'], true],
+        paint: {
+          'circle-radius': ['interpolate', ['linear'], ['zoom'], 8, 9, 10, 12, 13, 15, 16, 18],
+          'circle-color': '#7c3aed',
+          'circle-opacity': 0.28,
+          'circle-stroke-color': '#7c3aed',
+          'circle-stroke-width': 2,
+          'circle-stroke-opacity': 0.6,
+        },
+      }, 'vehicle-advisory');
       if (!isAdmin && state.selectedRouteId) {
         const selectedGeo = await api(`/api/network/geojson?usable_only=true&route_id=${encodeURIComponent(state.selectedRouteId)}`);
         map.getSource('route-lines')?.setData(selectedGeo);
@@ -209,7 +223,7 @@ function setupMap(id, isAdmin = false) {
         const bus = event.features?.[0]?.properties;
         if (bus?.vehicle_id) selectBus(bus.vehicle_id);
       };
-      for (const vehicleLayer of ['vehicle-fallback-points', 'vehicle-points', 'vehicle-advisory']) {
+      for (const vehicleLayer of ['vehicle-fallback-points', 'vehicle-points', 'vehicle-advisory', 'vehicle-advisory-halo']) {
         if (!map.getLayer(vehicleLayer)) continue;
         map.on('click', vehicleLayer, handleVehicleClick);
         map.on('mouseenter', vehicleLayer, () => { map.getCanvas().style.cursor = 'pointer'; });
@@ -275,7 +289,9 @@ function renderBusPositionLayers() {
   const dataFor = (buses) => ({
     type: 'FeatureCollection',
     features: buses.filter((bus) => Number.isFinite(Number(bus.lon)) && Number.isFinite(Number(bus.lat))).map((bus) => ({
-      type: 'Feature', properties: { ...bus, occ: Number(bus.occ_est_pct || 0) },
+      type: 'Feature',
+      // Normalize advisory_extra to a real JS boolean so MapLibre == filter always matches
+      properties: { ...bus, occ: Number(bus.occ_est_pct || 0), advisory_extra: Boolean(bus.advisory_extra) },
       geometry: { type: 'Point', coordinates: [Number(bus.lon), Number(bus.lat)] },
     })),
   });
@@ -973,12 +989,23 @@ async function loadExtraBuses() {
 function renderAdminExtraBuses() {
   const host = $('#admin-extra-buses');
   if (!host) return;
-  $('#extra-bus-count').textContent = `${state.extraBuses.length} tracked`;
+  const count = state.extraBuses.length;
+  const MAX = 50;
+  $('#extra-bus-count').textContent = `${count} tracked`;
+  // Update the limit bar
+  const limitText = $('#extra-bus-limit-text');
+  const limitFill = $('#extra-bus-limit-fill');
+  if (limitText) limitText.textContent = `${count} / ${MAX} active`;
+  if (limitFill) {
+    const pctFill = Math.min(100, (count / MAX) * 100);
+    limitFill.style.width = `${pctFill}%`;
+    limitFill.style.background = pctFill >= 90 ? 'linear-gradient(90deg,#ef4444,#dc2626)' : pctFill >= 70 ? 'linear-gradient(90deg,#f59e0b,#d97706)' : 'linear-gradient(90deg,#8b5cf6,#7c3aed)';
+  }
   host.innerHTML = state.extraBuses.length ? state.extraBuses.map((bus) => {
     const current = state.buses.find((item) => item.vehicle_id === bus.vehicle_id) || bus;
     const moving = Number(current.speed_mps || 0) > 0.5;
     const tracked = state.trackedExtraBusId === bus.vehicle_id;
-    return `<div class="extra-bus-card${tracked ? ' tracked' : ''}"><span><b>${escapeHtml(bus.vehicle_id)} · ${escapeHtml(bus.short_name || bus.route_id)}</b><small>${moving ? 'Moving' : 'Stopped'} · ${crowd(current.occ_est_pct)} ${pct(current.occ_est_pct)} · ${Number(current.lat).toFixed(4)}, ${Number(current.lon).toFixed(4)}</small></span><button data-track-extra="${escapeHtml(bus.vehicle_id)}">${tracked ? 'Tracking' : 'Track'}</button></div>`;
+    return `<div class="extra-bus-card${tracked ? ' tracked' : ''}"><span><b>◆ ${escapeHtml(bus.vehicle_id)} · ${escapeHtml(bus.short_name || bus.route_id)}</b><small>${moving ? '🟢 Moving' : '🔴 Stopped'} · ${crowd(current.occ_est_pct)} ${pct(current.occ_est_pct)} · ${Number(current.lat).toFixed(4)}, ${Number(current.lon).toFixed(4)}</small></span><button data-track-extra="${escapeHtml(bus.vehicle_id)}">${tracked ? '📍 Tracking' : 'Track'}</button></div>`;
   }).join('') : '<p class="empty-state">No approved extra bus has a recent stream snapshot yet. After approval, its first Kafka update will appear here.</p>';
   if (state.trackedExtraBusId) {
     const bus = state.buses.find((item) => item.vehicle_id === state.trackedExtraBusId)
@@ -1009,10 +1036,16 @@ async function trackExtraBus(vehicleId) {
   }
   try {
     await showAdvisoryRoute(bus.route_id, bus.region_id || state.selectedRegion);
-    const point = state.buses.find((item) => item.vehicle_id === vehicleId) || bus;
-    state.maps['admin-map']?.flyTo({ center: [Number(point.lon), Number(point.lat)], zoom: 14.5, duration: 700 });
+    // Use the most current position from the live stream if available; fall back to extra-buses snapshot
+    const livePos = state.buses.find((item) => item.vehicle_id === vehicleId) || bus;
+    const lon = Number(livePos.lon);
+    const lat = Number(livePos.lat);
+    if (Number.isFinite(lon) && Number.isFinite(lat) && (lon !== 0 || lat !== 0)) {
+      state.maps['admin-map']?.flyTo({ center: [lon, lat], zoom: 14.5, duration: 700 });
+    }
     $('#extra-bus-track-status').textContent = `Tracking ${vehicleId} on ${bus.short_name || bus.route_id}. The map marker and status refresh from the live stream.`;
-    connectVehicleStream();
+    // Select the bus to open its info card — do NOT reconnect the stream (that would blank all buses)
+    selectBus(vehicleId);
     renderAdminExtraBuses();
   } catch (error) { $('#extra-bus-track-status').textContent = error.message; }
 }
@@ -1168,6 +1201,24 @@ function setupInteractions() {
     const button = event.target.closest('[data-track-extra]');
     if (button) trackExtraBus(button.dataset.trackExtra);
   });
+  // Admin tab switching (Operations ↔ Kafka Streaming Engine)
+  $$('[data-admin-tab]').forEach((tab) => tab.addEventListener('click', () => {
+    const target = tab.dataset.adminTab;
+    state.activeAdminTab = target;
+    $$('[data-admin-tab]').forEach((t) => {
+      t.classList.toggle('selected', t === tab);
+      t.setAttribute('aria-selected', String(t === tab));
+    });
+    $('#admin-tab-operations').hidden = target !== 'operations';
+    $('#admin-tab-kafka').hidden = target !== 'kafka';
+    if (target === 'kafka') {
+      loadKafkaOverview();
+      for (const map of Object.values(state.maps)) setTimeout(() => map?.resize(), 80);
+    }
+  }));
+  // Kafka inspector refresh button
+  $('#kafka-inspector-refresh')?.addEventListener('click', () => loadKafkaMessages($('#kafka-topic-select')?.value || 'vehicle-telemetry'));
+  $('#kafka-topic-select')?.addEventListener('change', () => loadKafkaMessages($('#kafka-topic-select').value));
   $$('.assistant-prompts [data-ask]').forEach((button) => button.addEventListener('click', () => {
     $('#chat-input').value = button.dataset.ask;
     $('#chat-form').requestSubmit();
@@ -1189,8 +1240,85 @@ function setupInteractions() {
   });
 }
 
-async function startDashboard() {
+async function loadKafkaOverview() {
+  if (state.user?.role !== 'admin') return;
   try {
+    const data = await api('/api/admin/kafka/overview');
+    state.kafkaOverview = data;
+    // Hero stats
+    const lm = data.live_metrics || {};
+    if ($('#kafka-total-events')) $('#kafka-total-events').textContent = Number(lm.total_events_10min || 0).toLocaleString();
+    if ($('#kafka-avg-eps')) $('#kafka-avg-eps').textContent = Number(lm.avg_throughput_eps || 0).toFixed(1);
+    if ($('#kafka-p95-latency')) $('#kafka-p95-latency').textContent = Number(lm.p95_latency_s || 0).toFixed(2) + ' s';
+    const eb = data.extra_buses || {};
+    if ($('#kafka-extra-buses')) $('#kafka-extra-buses').textContent = `${eb.active ?? '—'} / 50`;
+    // DQ grid
+    if ($('#kdq-events')) $('#kdq-events').textContent = Number(lm.total_events_10min || 0).toLocaleString();
+    if ($('#kdq-eps')) $('#kdq-eps').textContent = Number(lm.avg_throughput_eps || 0).toFixed(1);
+    if ($('#kdq-malformed')) $('#kdq-malformed').textContent = Number(lm.malformed_10min || 0).toLocaleString();
+    if ($('#kdq-late')) $('#kdq-late').textContent = Number(lm.late_dropped_10min || 0).toLocaleString();
+    if ($('#kdq-p95')) $('#kdq-p95').textContent = Number(lm.p95_latency_s || 0).toFixed(2);
+    if ($('#kdq-alerts')) $('#kdq-alerts').textContent = Number(lm.alerts_10min || 0).toLocaleString();
+    // Topic catalog
+    renderKafkaTopics(data.topics || []);
+  } catch (error) { console.warn('Kafka overview unavailable', error); }
+}
+
+function renderKafkaTopics(topics) {
+  const grid = $('#kafka-topic-grid');
+  if (!grid) return;
+  const topicColors = {
+    'vehicle-telemetry': '#14a577', 'occupancy-state': '#2563eb',
+    'passenger-flow': '#7c3aed', 'window-aggregates': '#d97706',
+    'predictions': '#0891b2', 'alerts': '#dc2626', 'control': '#475569',
+  };
+  grid.innerHTML = topics.map((t) => {
+    const color = topicColors[t.name] || '#475569';
+    return `<div class="kafka-topic-card">
+      <div class="kafka-topic-card-header">
+        <span class="kafka-topic-name" style="color:${color}">${escapeHtml(t.name)}</span>
+        <div class="kafka-topic-parts">
+          <span class="kafka-part-pill">${t.partitions}P</span>
+          <span class="kafka-part-pill" style="background:#fdf2e9;color:#9a3412">${escapeHtml(t.retention)}</span>
+        </div>
+      </div>
+      <div class="kafka-topic-key">key: <code>${escapeHtml(t.key)}</code></div>
+      <div class="kafka-topic-purpose">${escapeHtml(t.purpose)}</div>
+    </div>`;
+  }).join('');
+}
+
+async function loadKafkaMessages(topic = 'vehicle-telemetry') {
+  const status = $('#kafka-inspector-status');
+  const list = $('#kafka-message-list');
+  if (!list) return;
+  if (status) status.textContent = 'Loading…';
+  list.innerHTML = '<p class="empty-state">Fetching messages…</p>';
+  try {
+    const data = await api(`/api/admin/kafka/messages?topic=${encodeURIComponent(topic)}&limit=5`);
+    const msgs = data.messages || [];
+    if (!msgs.length) {
+      list.innerHTML = '<p class="empty-state">No messages yet — start the simulation to produce events.</p>';
+      if (status) status.textContent = `0 messages · ${new Date().toLocaleTimeString()}`;
+      return;
+    }
+    list.innerHTML = msgs.map((msg) => `
+      <div class="kafka-message-card">
+        <div class="kafka-message-header">
+          <span class="kafka-message-topic">${escapeHtml(msg.topic)}</span>
+          <span class="kafka-message-partition">P${msg.partition ?? 0}</span>
+          <span class="kafka-message-key">key: ${escapeHtml(String(msg.key || ''))}</span>
+        </div>
+        <div class="kafka-message-payload"><pre>${escapeHtml(JSON.stringify(msg.payload, null, 2))}</pre></div>
+      </div>`).join('');
+    if (status) status.textContent = `${msgs.length} messages · ${new Date().toLocaleTimeString()}`;
+  } catch (error) {
+    list.innerHTML = `<p class="empty-state">Could not load messages: ${escapeHtml(error.message)}</p>`;
+    if (status) status.textContent = 'Error';
+  }
+}
+
+async function startDashboard() {  try {
     const session = await api('/api/auth/me');
     state.user = session.user;
     $('#signed-in-user').textContent = state.user?.username || '';
@@ -1211,7 +1339,7 @@ async function startDashboard() {
     connectVehicleStream();
     setInterval(loadHealth, 5000);
     setInterval(loadAlerts, 8000);
-    if (state.user?.role === 'admin') { setInterval(loadDq, 8000); setInterval(loadAdvisories, 10000); setInterval(loadExtraBuses, 4000); }
+    if (state.user?.role === 'admin') { setInterval(loadDq, 8000); setInterval(loadAdvisories, 10000); setInterval(loadExtraBuses, 4000); setInterval(() => { if (state.activeAdminTab === 'kafka') loadKafkaOverview(); }, 15000); }
     setInterval(() => {
       if (!document.hidden && state.buses.some((bus) => Number(bus.speed_mps) > 0.5)) renderBusPositionLayers();
     }, 250);
