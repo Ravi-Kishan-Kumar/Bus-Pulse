@@ -4,7 +4,8 @@ const state = { maps: {}, mapAdmin: {}, buses: [], adminRoutes: [], user: null,
   lastBusRefresh: 0, regionId: 'whole_city', selectedRegion: 'whole_city', regionSelectionManual: false,
   regions: [], routeGeometry: {}, selectionMarkers: {}, journeySort: 'fastest', lastBusRender: 0, simulationRunning: false,
   selectedRouteIds: [], journeyOptions: [], commuterDemandProfile: 'normal', extraBuses: [], trackedExtraBusId: null, advisoriesLoading: false,
-  activeAdminTab: 'operations', kafkaOverview: null };
+  activeAdminTab: 'operations', kafkaOverview: null,
+  selectedDirectionId: null, startProgressM: null, destProgressM: null };
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 const crowd = (pct = 0) => pct < 50 ? 'Low' : pct < 70 ? 'Medium' : pct <= 85 ? 'High' : 'Full';
@@ -440,6 +441,7 @@ async function connectVehicleStream() {
   const params = new URLSearchParams();
   if (state.user?.role !== 'admin') {
     if (commuterRouteIds.length) params.set('route_ids', commuterRouteIds.join(','));
+    if (state.selectedDirectionId != null) params.set('direction_id', String(state.selectedDirectionId));
     params.set('region_id', state.regionId || 'whole_city');
   }
   else params.set('region_id', state.selectedRegion || 'whole_city');
@@ -641,7 +643,10 @@ function updateSelectedRouteBusCards() {
   const host = $('#route-bus-list');
   if (!host || !state.selectedRoute) return;
   const selectedRoutes = state.selectedRouteIds.length ? state.selectedRouteIds : [state.selectedRouteId].filter(Boolean);
-  const routeBuses = state.buses.filter((bus) => selectedRoutes.includes(String(bus.route_id)));
+  const routeBuses = state.buses.filter((bus) =>
+    selectedRoutes.includes(String(bus.route_id)) &&
+    (state.selectedDirectionId == null || Number(bus.direction_id) === state.selectedDirectionId)
+  );
   $('#route-count').textContent = `${routeBuses.length} live`;
   host.innerHTML = routeBuses.length ? routeBuses.map((bus) => {
     const moving = Number(bus.speed_mps || 0) > 0.5;
@@ -673,6 +678,9 @@ function clearJourneyRouteSelection() {
   state.selectedRoute = null;
   state.journeyOptions = [];
   state.selectedBusId = null;
+  state.selectedDirectionId = null;
+  state.startProgressM = null;
+  state.destProgressM = null;
   $('#map-route-name').textContent = 'Choose a route to view it';
   $('#route-panel-title').textContent = 'Choose a route';
   $('#route-count').textContent = '— routes';
@@ -716,6 +724,10 @@ async function showJourneyOption(option) {
   state.selectedRouteId = String(demoLeg?.route_id || legs[0].route_id);
   state.selectedRoute = { route_id: state.selectedRouteId, short_name: demoLeg.short_name,
     long_name: demoLeg.long_name, simulated: Boolean(demoLeg.simulated) };
+  // Store direction so bus cards and map only show buses going the right way
+  state.selectedDirectionId = demoLeg.direction_id != null ? Number(demoLeg.direction_id) : null;
+  state.startProgressM = demoLeg.start_progress_m != null ? Number(demoLeg.start_progress_m) : null;
+  state.destProgressM = demoLeg.destination_progress_m != null ? Number(demoLeg.destination_progress_m) : null;
   syncCommuterDemoPanel();
   connectVehicleStream();
   try {
@@ -822,7 +834,11 @@ async function startCommuterRouteDemo(routeId) {
     updateSelectedRouteBusCards();
     const result = await api('/api/commuter/simulation', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ route_id: routeId, buses: count, region_id: state.regionId, demand_profile: demandProfile }),
+      body: JSON.stringify({
+        route_id: routeId, buses: count, region_id: state.regionId, demand_profile: demandProfile,
+        direction_index: state.selectedDirectionId != null ? state.selectedDirectionId : 0,
+        start_progress_m: state.startProgressM != null ? state.startProgressM : null,
+      }),
     });
     if (feedback) feedback.textContent = `Command accepted · ${result.region_name} · ${result.applied_buses} buses requested. Waiting for the first live snapshot…`;
     state.regionId = result.region_id || state.regionId;
@@ -943,18 +959,23 @@ async function loadAdvisories() {
     }));
     $$('[data-review]').forEach((button) => button.addEventListener('click', async () => {
       button.disabled = true;
+      const row = button.closest('.alert-row');
+      const advisoryId = button.dataset.advisory;
+      const reviewStatus = button.dataset.review;
+      if (row) row.style.opacity = '0.4';
       try {
-        const reviewed = await api(`/api/admin/advisories/${encodeURIComponent(button.dataset.advisory)}/review`, {
+        const reviewed = await api(`/api/admin/advisories/${encodeURIComponent(advisoryId)}/review`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status: button.dataset.review }),
+          body: JSON.stringify({ status: reviewStatus }),
         });
+        if (row) row.remove();
         if (reviewed.already_processed) {
           $('#control-feedback').textContent = reviewed.message;
           await loadExtraBuses();
           return;
         }
         if (reviewed.status === 'approved') {
-          if (reviewed.region_id && reviewed.region_id !== state.selectedRegion) {
+          if (reviewed.region_id && reviewed.region_id !== state.selectedRegion && reviewed.region_id !== 'whole_city') {
             state.selectedRegion = reviewed.region_id;
             $('#simulation-region').value = reviewed.region_id;
             state.regionSelectionManual = true;
@@ -968,10 +989,16 @@ async function loadAdvisories() {
           $('#control-feedback').textContent = `${reviewed.message} Its live location will appear under Approved extra buses.`;
           connectVehicleStream();
           loadFleet();
-          setTimeout(loadExtraBuses, 1200);
+          loadExtraBuses();
+          setTimeout(loadExtraBuses, 1000);
+          setTimeout(loadExtraBuses, 3000);
         }
         await loadAdvisories();
-      } catch (error) { $('#control-feedback').textContent = error.message; }
+      } catch (error) {
+        if (row) row.style.opacity = '1';
+        button.disabled = false;
+        $('#control-feedback').textContent = error.message;
+      }
     }));
   } catch { /* administrator data may be starting */ }
   finally { state.advisoriesLoading = false; }
@@ -980,7 +1007,7 @@ async function loadAdvisories() {
 async function loadExtraBuses() {
   if (state.user?.role !== 'admin') return;
   try {
-    const result = await api(`/api/admin/advisory-buses?region_id=${encodeURIComponent(state.selectedRegion || state.regionId)}`);
+    const result = await api('/api/admin/advisory-buses');
     state.extraBuses = result.buses || [];
     renderAdminExtraBuses();
   } catch { /* administrator data may be starting */ }
@@ -1122,10 +1149,16 @@ function setupInteractions() {
     const busButton = event.target.closest('[data-bus]');
     if (demoLegButton) {
       const routeId = String(demoLegButton.dataset.demoRoute);
+      const legIndex = Number(demoLegButton.dataset.demoLeg);
+      const leg = (state.journeyOptions[state.journeyOptions.findIndex((opt) =>
+        (opt.legs || []).some((l) => String(l.route_id) === routeId))] ?.legs || [])[legIndex];
       state.selectedRouteId = routeId;
       state.selectedRouteIds = [routeId];
       state.selectedRoute = { route_id: routeId, short_name: demoLegButton.dataset.demoShort,
         long_name: demoLegButton.dataset.demoLong, simulated: true };
+      state.selectedDirectionId = leg?.direction_id != null ? Number(leg.direction_id) : null;
+      state.startProgressM = leg?.start_progress_m != null ? Number(leg.start_progress_m) : null;
+      state.destProgressM = leg?.destination_progress_m != null ? Number(leg.destination_progress_m) : null;
       state.selectedBusId = null;
       $$('#route-results [data-demo-leg]').forEach((button) => { button.textContent = button === demoLegButton ? 'Selected demo leg' : 'Simulate this leg'; });
       syncCommuterDemoPanel();

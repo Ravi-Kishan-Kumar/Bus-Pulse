@@ -73,7 +73,8 @@ class BusSimulator:
             raise ValueError(f"route {self.route_id} needs at least one usable direction")
         self.directions = sorted(self.directions, key=lambda d: int(d["direction_id"]))[:2]
         self.ledger = OccupancyLedger(self.capacity, self.seat_capacity, self.stand_capacity, self.support_capacity)
-        self.direction_index = 0
+        # Preserve direction_index passed in (default 0); clamp to valid range
+        self.direction_index = max(0, min(self.direction_index, len(self.directions) - 1))
         self._shape_cumulative = []
         for direction in self.directions:
             shape = direction["shape"]

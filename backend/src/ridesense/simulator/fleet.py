@@ -82,11 +82,17 @@ class FleetManager:
         return {route_id: len(buses) for route_id, buses in sorted(self._fleet.items()) if buses}
 
     def _new_bus(self, route_id: str, position_index: int, route_count: int,
-                 advisory_extra: bool = False):
+                 advisory_extra: bool = False, direction_index: int = 0,
+                 start_progress_m: float | None = None):
         route = self._routes[route_id]
         directions = self._route_directions[route_id]
         length = float(directions[0]["length_m"])
-        progress = length * ((position_index + 0.5) / max(1, route_count))
+        if start_progress_m is not None:
+            # Spread demo buses upstream of the journey start stop (each ~600m apart)
+            upstream_offset = max(0.0, start_progress_m - position_index * 600.0)
+            progress = max(0.0, upstream_offset)
+        else:
+            progress = length * ((position_index + 0.5) / max(1, route_count))
         vehicle_id = f"V{self._next_vehicle:03d}"
         self._next_vehicle += 1
         profile = self._rng.choices(self.vehicle_profiles,
@@ -101,7 +107,7 @@ class FleetManager:
             support_capacity=int(profile["handholds"]), vehicle_type=str(profile["name"]),
             capacity_range_min=int(profile["range_min"]), capacity_range_max=int(profile["range_max"]),
             advisory_extra=advisory_extra, demand_profile=self.demand_profile,
-            stop_hub_scores=self._hub_scores,
+            stop_hub_scores=self._hub_scores, direction_index=direction_index,
         )
         return bus
 
@@ -113,8 +119,9 @@ class FleetManager:
             current_extra_count = len(self._fleet.get(advisory_extra_route_id, []))
             normalized[advisory_extra_route_id] = max(
                 normalized.get(advisory_extra_route_id, 0), current_extra_count + 1)
-        if sum(normalized.values()) > self.max_buses:
-            raise ValueError(f"fleet request has {sum(normalized.values())} buses; limit is {self.max_buses}")
+        max_allowed = self.max_buses + (50 if advisory_extra_route_id else 0)
+        if sum(normalized.values()) > max_allowed:
+            raise ValueError(f"fleet request has {sum(normalized.values())} buses; limit is {max_allowed}")
         unknown = [route_id for route_id in normalized if route_id not in self._route_directions]
         if unknown:
             raise ValueError(f"route ids are missing or do not have a usable direction: {unknown}")
@@ -133,8 +140,9 @@ class FleetManager:
             else:
                 buses = list(existing)
                 for index in range(len(existing), desired):
+                    is_extra = (route_id == advisory_extra_route_id and index == desired - 1)
                     buses.append(self._new_bus(route_id, index, desired,
-                                               advisory_extra=route_id == advisory_extra_route_id))
+                                               advisory_extra=is_extra))
                 next_fleet[route_id] = buses
         self._fleet = next_fleet
         for buses in self._fleet.values():
@@ -170,7 +178,8 @@ class FleetManager:
         counts = self.recommended_fleet(region_id)
         self.set_route_bus_counts(counts)
 
-    def set_route_demo(self, route_id: str, bus_count: int, demand_profile: str = "normal"):
+    def set_route_demo(self, route_id: str, bus_count: int, demand_profile: str = "normal",
+                       direction_index: int = 0, start_progress_m: float | None = None):
         if demand_profile not in {"normal", "moderate", "high"}:
             raise ValueError("route demo crowding must be normal, moderate, or high")
         self.demand_profile = "rush" if demand_profile == "high" else demand_profile
@@ -196,6 +205,8 @@ class FleetManager:
             self._fleet = {}
             self.set_route_bus_counts(self.recommended_fleet(self.region_id))
         counts = self.route_bus_counts
+        # Remove buses on the demo route so we can respawn with correct direction/position
+        self._fleet.pop(route_id, None)
         counts[route_id] = desired
         overflow = sum(counts.values()) - self.max_buses
         if overflow > 0:
@@ -214,15 +225,37 @@ class FleetManager:
                     break
         if overflow > 0:
             raise ValueError("route demo cannot fit within the regional fleet limit")
-        self.set_route_bus_counts(counts)
+        # Spawn demo route buses with the correct direction and upstream start position
+        demo_buses = []
+        for index in range(desired):
+            demo_buses.append(self._new_bus(route_id, index, desired,
+                                            direction_index=direction_index,
+                                            start_progress_m=start_progress_m))
+        self._fleet[route_id] = demo_buses
+        # Ensure non-demo routes have their counts applied
+        non_demo = {r: c for r, c in counts.items() if r != route_id}
+        for rid, desired_count in non_demo.items():
+            existing = self._fleet.get(rid, [])
+            if len(existing) < desired_count:
+                extra = [self._new_bus(rid, i, desired_count) for i in range(len(existing), desired_count)]
+                self._fleet[rid] = existing + extra
+            elif len(existing) > desired_count:
+                self._fleet[rid] = existing[:desired_count]
+        for buses in self._fleet.values():
+            for bus in buses:
+                bus.demand_profile = self.demand_profile
+                bus.region_id = self.region_id
         self.paused = False
 
     def apply_command(self, command: ControlCommand | dict[str, Any]):
         if isinstance(command, dict):
             command = ControlCommand.model_validate(command)
-        if command.action == "set_fleet" and command.region_id:
-            self.region_id = command.region_id
-            self.recommended_fleet(self.region_id)
+        if command.action == "set_fleet":
+            if command.region_id:
+                self.region_id = command.region_id
+            extra_route = command.parameters.get("advisory_extra_route_id")
+            self.set_route_bus_counts(command.route_bus_counts,
+                                      advisory_extra_route_id=str(extra_route) if extra_route else None)
         elif command.action == "route_demo":
             if command.region_id not in REGIONS:
                 raise ValueError("route demo needs a supported Bengaluru region")
@@ -230,7 +263,12 @@ class FleetManager:
             route_id = str(command.parameters.get("route_id", ""))
             bus_count = int(command.parameters.get("buses", 0))
             demand_profile = str(command.parameters.get("demand_profile", "normal"))
-            self.set_route_demo(route_id, bus_count, demand_profile)
+            direction_index_raw = command.parameters.get("direction_index")
+            direction_index = int(direction_index_raw) if direction_index_raw is not None else 0
+            start_progress_raw = command.parameters.get("start_progress_m")
+            start_progress_m = float(start_progress_raw) if start_progress_raw is not None else None
+            self.set_route_demo(route_id, bus_count, demand_profile,
+                                direction_index=direction_index, start_progress_m=start_progress_m)
         elif command.action in {"set_region", "start", "resume", "rush_hour", "normal_hours",
                                 "moderate_hours", "reset"} and command.region_id:
             self.set_region(command.region_id)
@@ -244,10 +282,6 @@ class FleetManager:
             if command.speedup not in (1, 5):
                 raise ValueError("speedup must be 1 or 5")
             self.speedup = command.speedup
-        elif command.action == "set_fleet":
-            extra_route = command.parameters.get("advisory_extra_route_id")
-            self.set_route_bus_counts(command.route_bus_counts,
-                                      advisory_extra_route_id=str(extra_route) if extra_route else None)
         elif command.action == "route_demo":
             pass
         elif command.action in {"rush_hour", "normal_hours", "moderate_hours"}:

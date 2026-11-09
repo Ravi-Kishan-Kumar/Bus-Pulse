@@ -428,7 +428,12 @@ def refresh_advisories(conn):
                                     AND v.updated_at > now() - (%s * interval '1 second')) AS buses
                FROM alerts a JOIN routes r USING(route_id)
                WHERE a.acknowledged_at IS NULL AND a.alert_type IN ('OVERCROWD','PREDICTED_OVERCROWD')
-               ORDER BY a.detected_at DESC LIMIT 30""", (_live_ttl(),)
+                 AND NOT EXISTS (SELECT 1 FROM advisories adv WHERE adv.event_id = a.event_id)
+                 AND NOT EXISTS (SELECT 1 FROM advisories adv WHERE adv.route_id = a.route_id
+                                 AND adv.status = 'approved' AND adv.created_at > now() - interval '15 minutes')
+                 AND NOT EXISTS (SELECT 1 FROM vehicle_latest vl WHERE vl.route_id = a.route_id
+                                 AND vl.advisory_extra = true AND vl.updated_at > now() - (%s * interval '1 second'))
+               ORDER BY a.detected_at DESC LIMIT 30""", (_live_ttl(), _live_ttl())
         )
         alerts = cur.fetchall()
         for alert in alerts:

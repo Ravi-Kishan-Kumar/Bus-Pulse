@@ -25,8 +25,9 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://ridesense:ridesense-local
 CHECKPOINT = os.getenv("CHECKPOINT_DIR", "/app/checkpoints")
 OCCUPANCY_THRESHOLD = float(os.getenv("OVERCROWD_THRESHOLD_PCT", "85"))
 WINDOW_SECONDS = int(os.getenv("WINDOW_SECONDS", "60"))
-ALLOWED_LATENESS = int(os.getenv("ALLOWED_LATENESS_SECONDS", "15"))
+ALLOWED_LATENESS = int(os.getenv("ALLOWED_LATENESS_SECONDS", "120"))
 _LAST_INGEST_MONOTONIC: float | None = None
+_STREAM_MAX_SEEN_TS: datetime | None = None
 _LGBM_MODEL = None
 _LGBM_MODEL_MTIME: float | None = None
 _OUTPUT_PRODUCER = Producer({
@@ -78,7 +79,7 @@ def _dt(value):
 
 
 def write_raw(batch, batch_id: int):
-    global _LAST_INGEST_MONOTONIC
+    global _LAST_INGEST_MONOTONIC, _STREAM_MAX_SEEN_TS
     rows = [r.asDict(recursive=True) for r in batch.collect()]
     if not rows:
         return
@@ -89,14 +90,15 @@ def write_raw(batch, batch_id: int):
     event_times = [_dt(r["event_ts"]) for r in rows]
     produced_ages = [max(0.0, r["produced_ts_ms"] / 1000 - _dt(r["event_ts"]).timestamp())
                      for r in rows if r.get("produced_ts_ms")]
+    batch_max = max(event_times) if event_times else None
+    if batch_max:
+        if _STREAM_MAX_SEEN_TS is None or batch_max > _STREAM_MAX_SEEN_TS:
+            _STREAM_MAX_SEEN_TS = batch_max
+    lateness_floor = (_STREAM_MAX_SEEN_TS.timestamp() - ALLOWED_LATENESS) if _STREAM_MAX_SEEN_TS else 0.0
+    late_dropped = sum(ts.timestamp() < lateness_floor for ts in event_times) if lateness_floor else 0
+    ooo_applied = sum(ts.timestamp() < _STREAM_MAX_SEEN_TS.timestamp() and ts.timestamp() >= lateness_floor for ts in event_times) if _STREAM_MAX_SEEN_TS else 0
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT max(event_ts) FROM occupancy_state")
-            prior_max = cur.fetchone()[0]
-            max_seen = max(event_times + ([_dt(prior_max)] if prior_max else []))
-            lateness_floor = max_seen.timestamp() - ALLOWED_LATENESS
-            late_dropped = sum(ts.timestamp() < lateness_floor for ts in event_times)
-            ooo_applied = sum(ts.timestamp() < max_seen.timestamp() and ts.timestamp() >= lateness_floor for ts in event_times)
             duplicates = 0
             for r in rows:
                 event_ts = _dt(r["event_ts"])
@@ -222,7 +224,7 @@ def write_windows(batch, batch_id: int):
                        VALUES (%s,%s,%s,'plus_5m',%s,%s,%s) ON CONFLICT DO NOTHING""",
                     (made_at, r["vehicle_id"], r["route_id"], predicted, model_version, Jsonb(contributions)),
                 )
-                if float(r["occ_max"]) < OCCUPANCY_THRESHOLD:
+                if float(r["occ_max"]) < OCCUPANCY_THRESHOLD * 0.80:
                     cur.execute(
                         """UPDATE alerts SET resolved_at=COALESCE(resolved_at,%s)
                            WHERE vehicle_id=%s AND alert_type='OVERCROWD' AND resolved_at IS NULL
@@ -247,11 +249,9 @@ def write_windows(batch, batch_id: int):
                 _safe_produce(_OUTPUT_PRODUCER, "predictions", key=r["vehicle_id"],
                               value=json.dumps(prediction_event).encode())
                 alert_types = []
-                if consecutive and float(previous[2]) > OCCUPANCY_THRESHOLD and float(r["occ_max"]) > OCCUPANCY_THRESHOLD:
+                if float(r["occ_max"]) >= OCCUPANCY_THRESHOLD:
                     alert_types.append(("OVERCROWD", "critical", float(r["occ_max"])))
-                if (predicted >= OCCUPANCY_THRESHOLD and float(r["occ_mean"]) <= OCCUPANCY_THRESHOLD
-                        and consecutive and previous_prediction
-                        and float(previous_prediction[0]) >= OCCUPANCY_THRESHOLD):
+                if (predicted >= OCCUPANCY_THRESHOLD and float(r["occ_mean"]) <= OCCUPANCY_THRESHOLD):
                     alert_types.append(("PREDICTED_OVERCROWD", "warning", predicted))
                 for kind, severity, value in alert_types:
                     event_id = hashlib.sha256(f"{kind}|{r['vehicle_id']}|{start.isoformat()}".encode()).hexdigest()

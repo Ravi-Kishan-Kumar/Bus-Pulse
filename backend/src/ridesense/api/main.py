@@ -308,20 +308,21 @@ def _attach_journey_bus_info(cur, options: list[dict], *, region_id: str | None,
                FROM vehicle_latest v
                JOIN route_stops s ON s.route_id=v.route_id AND s.direction_id=%s AND s.seq=%s
                JOIN route_directions d ON d.route_id=v.route_id AND d.direction_id=%s
-               WHERE v.route_id=%s AND v.updated_at>now()-(%s * interval '1 second')
+               WHERE v.route_id=%s AND v.direction_id=%s AND v.updated_at>now()-(%s * interval '1 second')
                ORDER BY v.event_ts DESC LIMIT 40""",
             (option["direction_id"], option["start_seq"], option["direction_id"], option["route_id"],
-             BUS_LIVE_TTL_SECONDS),
+             option["direction_id"], BUS_LIVE_TTL_SECONDS),
         )
         candidates = []
         for bus in cur.fetchall():
             length = float(bus["length_m"] or option.get("route_length_m") or 0)
             start_progress = float(bus["start_progress_m"])
             bus_progress = float(bus["progress_m"])
-            if bus["direction_id"] == option["direction_id"]:
-                distance = start_progress-bus_progress if bus_progress <= start_progress else max(0, 2*length-bus_progress+start_progress)
+            # Only buses in the correct direction; wrap-around if already past start (looping back around)
+            if bus_progress <= start_progress + 500:
+                distance = max(0.0, start_progress - bus_progress)
             else:
-                distance = max(0, length-bus_progress)+start_progress
+                distance = max(0.0, length - bus_progress + start_progress)
             speed = float(bus["speed_mps"] or 0)
             eta = distance / max(speed, 3.5) / 60 + (0.0 if speed > 0.5 else 0.25)
             candidates.append({**bus, "distance_to_board_m": round(distance),
@@ -468,10 +469,10 @@ def alerts(active_only: bool = True, limit: int = Query(default=100, ge=1, le=50
     with app.state.db.connection() as conn, conn.cursor() as cur:
         cur.execute(
             """SELECT * FROM alerts a WHERE (NOT %s OR (acknowledged_at IS NULL AND resolved_at IS NULL))
-               AND (%s::text IS NULL OR EXISTS (SELECT 1 FROM route_regions rr
+               AND (%s::text IS NULL OR %s::text = 'whole_city' OR EXISTS (SELECT 1 FROM route_regions rr
                    WHERE rr.route_id=a.route_id AND rr.region_id=%s))
                ORDER BY detected_at DESC LIMIT %s""",
-            (active_only, region_id, region_id, limit),
+            (active_only, region_id, region_id, region_id, limit),
         )
         return {"alerts": cur.fetchall()}
 
@@ -701,12 +702,16 @@ def review_advisory(advisory_id: str, body: dict,
         if status == "approved":
             cur.execute("SELECT region_id FROM simulation_status WHERE singleton_id=1")
             simulation = cur.fetchone() or {"region_id": "whole_city"}
+            sim_region = simulation.get("region_id") or "whole_city"
             cur.execute("SELECT region_id FROM route_regions WHERE route_id=%s ORDER BY region_id",
                         (advisory["route_id"],))
             route_regions = [row["region_id"] for row in cur.fetchall() if row["region_id"] in REGIONS]
-            region_id = simulation["region_id"] if simulation["region_id"] in route_regions else (route_regions[0] if route_regions else None)
-            if not region_id:
-                raise HTTPException(status_code=409, detail="This route is not assigned to a supported simulation region")
+            if sim_region == "whole_city" or sim_region in route_regions:
+                region_id = sim_region
+            elif route_regions:
+                region_id = route_regions[0]
+            else:
+                region_id = "whole_city"
             # Enforce global extra-bus safety ceiling before allocating
             MAX_EXTRA_BUSES = 50
             cur.execute(
@@ -722,19 +727,44 @@ def review_advisory(advisory_id: str, body: dict,
             routes, max_buses = _region_fleet_plan(cur, region_id)
             route_by_id = {str(route["route_id"]): route for route in routes}
             selected = route_by_id.get(str(advisory["route_id"]))
+            if selected is None and region_id != "whole_city":
+                routes, max_buses = _region_fleet_plan(cur, "whole_city")
+                route_by_id = {str(route["route_id"]): route for route in routes}
+                selected = route_by_id.get(str(advisory["route_id"]))
+                if selected is not None:
+                    region_id = "whole_city"
             if selected is None:
                 raise HTTPException(status_code=409, detail="The advisory route is not in the active simulated fleet")
             counts = {str(route["route_id"]): max(
                 int(route["minimum_buses"]), int(route["live_buses"] or route["recommended_buses"]))
                 for route in routes}
-            counts[str(advisory["route_id"])] += 1
-            if sum(counts.values()) > max_buses:
-                raise HTTPException(status_code=422, detail=f"Adding a bus would exceed the configured {max_buses}-bus fleet limit")
+            counts[str(advisory["route_id"])] = counts.get(str(advisory["route_id"]), 0) + 1
+            overflow = sum(counts.values()) - max_buses
+            if overflow > 0:
+                candidates = sorted(
+                    (cand for cand in counts if cand != str(advisory["route_id"])),
+                    key=lambda cand: counts[cand] - (2 if int(route_by_id.get(cand, {}).get("connection_stops", 0) or 0) <= 1 else 1),
+                    reverse=True,
+                )
+                for cand in candidates:
+                    min_cand = 2 if int(route_by_id.get(cand, {}).get("connection_stops", 0) or 0) <= 1 else 1
+                    removable = max(0, counts[cand] - min_cand)
+                    reduction = min(removable, overflow)
+                    counts[cand] -= reduction
+                    overflow -= reduction
+                    if overflow == 0:
+                        break
             command = _control_command("set_fleet", region_id=region_id, route_bus_counts=counts,
                                        parameters={"advisory_extra_route_id": str(advisory["route_id"])})
             _publish_control(command)
         cur.execute("UPDATE advisories SET status=%s WHERE advisory_id=%s AND status='pending'",
                     (status, advisory_id))
+        cur.execute("UPDATE alerts SET acknowledged_at=now() WHERE event_id=%s", (advisory["event_id"],))
+        if status == "approved":
+            cur.execute("UPDATE alerts SET acknowledged_at=now() WHERE route_id=%s AND acknowledged_at IS NULL",
+                        (advisory["route_id"],))
+            cur.execute("UPDATE advisories SET status='approved' WHERE route_id=%s AND status='pending'",
+                        (advisory["route_id"],))
     return {"advisory_id": advisory_id, "status": status,
             "route_id": str(advisory["route_id"]),
             "region_id": region_id if status == "approved" else None,
@@ -818,6 +848,10 @@ def commuter_simulation(body: dict, request: Request):
     if demand_profile not in {"normal", "moderate", "high"}:
         raise HTTPException(status_code=422, detail="Crowding profile must be normal, moderate, or high")
     region_id = str(body.get("region_id", "")).strip()
+    direction_index_raw = body.get("direction_index")
+    direction_index = int(direction_index_raw) if direction_index_raw is not None else 0
+    start_progress_raw = body.get("start_progress_m")
+    start_progress_m = float(start_progress_raw) if start_progress_raw is not None else None
     with app.state.db.connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT region_id FROM simulation_status WHERE singleton_id=1")
         status = cur.fetchone() or {"region_id": "whole_city"}
@@ -844,7 +878,9 @@ def commuter_simulation(body: dict, request: Request):
         raise HTTPException(status_code=422, detail=f"This demo fleet would exceed the configured {max_buses}-bus limit")
     _publish_control(_control_command("route_demo", region_id=region_id,
                                       parameters={"route_id": route_id, "buses": applied_count,
-                                                  "demand_profile": demand_profile},
+                                                  "demand_profile": demand_profile,
+                                                  "direction_index": direction_index,
+                                                  "start_progress_m": start_progress_m},
                                       requested_by=str(user.get("sub", "commuter"))))
     return {"accepted": True, "region_id": region_id, "region_name": REGIONS[region_id]["name"],
             "route_id": route_id, "requested_buses": requested_buses,
@@ -929,6 +965,8 @@ async def websocket_updates(websocket: WebSocket, route_id: str | None = None,
     route_id = route_id or websocket.query_params.get("route_id")
     route_ids_raw = route_ids or websocket.query_params.get("route_ids")
     route_id_list = [item.strip() for item in (route_ids_raw or "").split(",") if item.strip()] or None
+    direction_id_raw = websocket.query_params.get("direction_id")
+    direction_id: int | None = int(direction_id_raw) if direction_id_raw is not None and direction_id_raw.lstrip("-").isdigit() else None
     last_update = None
     first_snapshot = True
     try:
@@ -942,10 +980,12 @@ async def websocket_updates(websocket: WebSocket, route_id: str | None = None,
                          AND (%s::text IS NULL OR %s::text = 'whole_city' OR region_id=%s
                               OR EXISTS (SELECT 1 FROM route_regions live_rr
                                          WHERE live_rr.route_id=vehicle_latest.route_id AND live_rr.region_id=%s))
+                         AND (%s::int IS NULL OR direction_id=%s)
                          AND (%s::timestamptz IS NULL OR updated_at>%s::timestamptz)
                        ORDER BY updated_at DESC LIMIT 4000"""
                 cur.execute(query, (BUS_LIVE_TTL_SECONDS, route_id, route_id, route_id_list, route_id_list,
-                                    region_id, region_id, region_id, region_id, last_update, last_update))
+                                    region_id, region_id, region_id, region_id,
+                                    direction_id, direction_id, last_update, last_update))
                 buses_now = cur.fetchall()
                 if first_snapshot or buses_now:
                     is_snapshot = first_snapshot
