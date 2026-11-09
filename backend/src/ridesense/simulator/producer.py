@@ -9,7 +9,7 @@ import logging
 import os
 import signal
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -135,6 +135,8 @@ class SimulatorRunner:
             if now_monotonic >= next_tick:
                 produced_ms = int(time.time() * 1000)
                 ticks = self.fleet.tick(self.event_time, self.beat_seconds, produced_ms)
+                now_utc = datetime.now(timezone.utc)
+                self._update_vehicle_latest(ticks, now_utc)
                 for tick in ticks:
                     self._send("vehicle-telemetry", tick.telemetry.vehicle_id, tick.telemetry)
                     state = tick.occupancy
@@ -185,6 +187,49 @@ class SimulatorRunner:
                 (status["running"], status["paused"], status["rush_hour"], status["demand_profile"], status["region_id"],
                  status["speedup"], status["total_buses"], status["active_routes"]),
             )
+
+    def _update_vehicle_latest(self, ticks, now_utc):
+        if not ticks:
+            return
+        rows = []
+        for tick in ticks:
+            t = tick.telemetry
+            o = tick.occupancy
+            ts_str = str(t.event_ts).replace("Z", "+00:00")
+            event_ts = datetime.fromisoformat(ts_str) if isinstance(ts_str, str) else t.event_ts
+            rows.append((
+                t.vehicle_id, t.route_id, t.region_id or "whole_city", t.direction_id, event_ts,
+                t.lat or 0.0, t.lon or 0.0, t.progress_m or 0.0, t.speed_mps or 0.0, o["occ_est_pct"],
+                o["seated_count"], o["standing_count"], o["supported_standing_count"], now_utc,
+                o["onboard_count"], o["capacity"], o["seat_capacity"], o["stand_capacity"],
+                o["standing_support_capacity"], t.vehicle_type, t.capacity_range_min,
+                t.capacity_range_max, bool(t.advisory_extra),
+            ))
+        try:
+            with psycopg.connect(self.database_url) as conn, conn.cursor() as cur:
+                cur.executemany(
+                    """INSERT INTO vehicle_latest
+                       (vehicle_id,route_id,region_id,direction_id,event_ts,lat,lon,progress_m,speed_mps,occ_est_pct,
+                        seated_count,standing_count,supported_standing_count,updated_at,onboard_count,capacity,
+                        seat_capacity,stand_capacity,support_capacity,vehicle_type,capacity_range_min,capacity_range_max,
+                        advisory_extra)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                       ON CONFLICT (vehicle_id) DO UPDATE SET route_id=EXCLUDED.route_id,
+                        region_id=EXCLUDED.region_id,direction_id=EXCLUDED.direction_id,event_ts=EXCLUDED.event_ts,lat=EXCLUDED.lat,
+                        lon=EXCLUDED.lon,progress_m=EXCLUDED.progress_m,speed_mps=EXCLUDED.speed_mps,
+                        occ_est_pct=EXCLUDED.occ_est_pct,
+                        seated_count=EXCLUDED.seated_count,standing_count=EXCLUDED.standing_count,
+                        supported_standing_count=EXCLUDED.supported_standing_count,updated_at=EXCLUDED.updated_at,
+                        onboard_count=EXCLUDED.onboard_count,capacity=EXCLUDED.capacity,
+                        seat_capacity=EXCLUDED.seat_capacity,stand_capacity=EXCLUDED.stand_capacity,
+                        support_capacity=EXCLUDED.support_capacity,vehicle_type=EXCLUDED.vehicle_type,
+                        capacity_range_min=EXCLUDED.capacity_range_min,capacity_range_max=EXCLUDED.capacity_range_max,
+                        advisory_extra=EXCLUDED.advisory_extra
+                       WHERE vehicle_latest.event_ts <= EXCLUDED.event_ts""",
+                    rows,
+                )
+        except Exception:
+            LOG.exception("Could not update vehicle_latest fallback")
 
 
 def main():

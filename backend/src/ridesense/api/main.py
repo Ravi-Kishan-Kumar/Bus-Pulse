@@ -542,11 +542,11 @@ def admin_advisory_buses(request: Request, region_id: str | None = Query(default
                FROM vehicle_latest v JOIN routes r USING(route_id)
                WHERE v.advisory_extra=true
                  AND v.updated_at>now()-(%s * interval '1 second')
-                 AND (%s::text IS NULL OR v.region_id=%s OR v.region_id='whole_city'
+                 AND (%s::text IS NULL OR %s::text = 'whole_city' OR v.region_id=%s
                       OR EXISTS (SELECT 1 FROM route_regions live_rr
                                  WHERE live_rr.route_id=v.route_id AND live_rr.region_id=%s))
                ORDER BY v.updated_at DESC LIMIT 200""",
-            (BUS_LIVE_TTL_SECONDS, region_id, region_id, region_id),
+            (BUS_LIVE_TTL_SECONDS, region_id, region_id, region_id, region_id),
         )
         return {"buses": cur.fetchall(), "region_id": region_id,
                 "updated_at": datetime.now(timezone.utc).isoformat(), "simulated": True}
@@ -788,7 +788,9 @@ async def websocket_updates(websocket: WebSocket, route_id: str | None = None,
         return
     await websocket.accept()
     region_id = websocket.query_params.get("region_id")
-    route_id_list = [item.strip() for item in (route_ids or "").split(",") if item.strip()] or None
+    route_id = route_id or websocket.query_params.get("route_id")
+    route_ids_raw = route_ids or websocket.query_params.get("route_ids")
+    route_id_list = [item.strip() for item in (route_ids_raw or "").split(",") if item.strip()] or None
     last_update = None
     first_snapshot = True
     try:
@@ -799,27 +801,29 @@ async def websocket_updates(websocket: WebSocket, route_id: str | None = None,
                        FROM vehicle_latest WHERE updated_at > now() - (%s * interval '1 second')
                          AND (%s::text IS NULL OR route_id=%s)
                          AND (%s::text[] IS NULL OR route_id=ANY(%s))
-                         AND (%s::text IS NULL OR region_id=%s OR region_id='whole_city'
+                         AND (%s::text IS NULL OR %s::text = 'whole_city' OR region_id=%s
                               OR EXISTS (SELECT 1 FROM route_regions live_rr
                                          WHERE live_rr.route_id=vehicle_latest.route_id AND live_rr.region_id=%s))
                          AND (%s::timestamptz IS NULL OR updated_at>%s::timestamptz)
                        ORDER BY updated_at DESC LIMIT 4000"""
                 cur.execute(query, (BUS_LIVE_TTL_SECONDS, route_id, route_id, route_id_list, route_id_list,
-                                    region_id, region_id, region_id, last_update, last_update))
+                                    region_id, region_id, region_id, region_id, last_update, last_update))
                 buses_now = cur.fetchall()
                 if first_snapshot or buses_now:
+                    is_snapshot = first_snapshot
                     if buses_now:
                         last_update = max(bus["updated_at"] for bus in buses_now)
                     chunk_size = 200
                     chunks = [buses_now[offset:offset + chunk_size]
                               for offset in range(0, len(buses_now), chunk_size)] or [[]]
                     for chunk_index, chunk in enumerate(chunks):
-                        payload = {"type": "vehicles", "snapshot": first_snapshot,
+                        payload = {"type": "vehicles", "snapshot": is_snapshot,
                                    "snapshot_chunk_index": chunk_index,
                                    "snapshot_chunk_count": len(chunks),
                                    "buses": chunk, "simulated": True}
                         await websocket.send_text(json.dumps(payload, default=str))
-                    first_snapshot = False
+                    if buses_now:
+                        first_snapshot = False
             import asyncio
             await asyncio.sleep(2)
     except WebSocketDisconnect:

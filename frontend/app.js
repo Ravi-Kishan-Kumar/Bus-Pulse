@@ -22,6 +22,11 @@ function makeBlankStyle() {
 }
 
 function ensureNormalBusIcons(map) {
+  if (typeof CanvasRenderingContext2D !== 'undefined' && !CanvasRenderingContext2D.prototype.roundRect) {
+    CanvasRenderingContext2D.prototype.roundRect = function(x, y, w, h, r) {
+      this.rect(x, y, w, h);
+    };
+  }
   const variants = [
     ['low', '#14a577'],
     ['moderate', '#e89b17'],
@@ -114,25 +119,29 @@ function setupMap(id, isAdmin = false) {
     if (styleReady) return;
     styleReady = true;
     try {
-      const geo = isAdmin
-        ? await api(`/api/network/geojson?usable_only=true&simulated_only=true&region_id=${encodeURIComponent(state.selectedRegion)}`)
-        : { type: 'FeatureCollection', features: [] };
-      if (!map.getSource('route-lines')) map.addSource('route-lines', { type: 'geojson', data: geo });
-      cacheRouteGeometry(geo);
-      if (isAdmin) {
-        const region = state.regions.find((item) => item.id === state.selectedRegion);
-        if (region) map.jumpTo({ center: region.center, zoom: region.zoom });
-        else fitMapToRouteGeo(map, geo);
+      try {
+        const geo = isAdmin
+          ? await api(`/api/network/geojson?usable_only=true&simulated_only=true&region_id=${encodeURIComponent(state.selectedRegion)}`)
+          : { type: 'FeatureCollection', features: [] };
+        if (!map.getSource('route-lines')) map.addSource('route-lines', { type: 'geojson', data: geo });
+        cacheRouteGeometry(geo);
+        if (isAdmin) {
+          const region = state.regions.find((item) => item.id === state.selectedRegion);
+          if (region) map.jumpTo({ center: region.center, zoom: region.zoom });
+          else fitMapToRouteGeo(map, geo);
+        }
+        if (!map.getLayer('route-lines')) map.addLayer({
+          id: 'route-lines', type: 'line', source: 'route-lines',
+          paint: {
+            'line-color': isAdmin ? ['case', ['==', ['get', 'simulated'], true], '#2865da', '#7a91b2']
+              : ['match', ['get', 'journey_leg'], 0, '#2865da', 1, '#e36a45', '#2865da'],
+            'line-opacity': isAdmin ? ['case', ['==', ['get', 'simulated'], true], 0.82, 0.45] : 0.95,
+            'line-width': isAdmin ? ['case', ['==', ['get', 'simulated'], true], 2.5, 1.4] : 4,
+          },
+        });
+      } catch (geoErr) {
+        console.warn('Could not load static route lines', geoErr);
       }
-      if (!map.getLayer('route-lines')) map.addLayer({
-        id: 'route-lines', type: 'line', source: 'route-lines',
-        paint: {
-          'line-color': isAdmin ? ['case', ['==', ['get', 'simulated'], true], '#2865da', '#7a91b2']
-            : ['match', ['get', 'journey_leg'], 0, '#2865da', 1, '#e36a45', '#2865da'],
-          'line-opacity': isAdmin ? ['case', ['==', ['get', 'simulated'], true], 0.82, 0.45] : 0.95,
-          'line-width': isAdmin ? ['case', ['==', ['get', 'simulated'], true], 2.5, 1.4] : 4,
-        },
-      });
       if (!map.getSource('vehicle-points')) map.addSource('vehicle-points', {
         type: 'geojson', data: { type: 'FeatureCollection', features: [] },
       });
@@ -226,7 +235,8 @@ function setupMap(id, isAdmin = false) {
     if (!styleReady && !fallback) {
       fallback = true;
       map.setStyle(makeBlankStyle());
-      map.once('style.load', attachLayers);
+      if (map.isStyleLoaded()) attachLayers();
+      else map.once('styledata', attachLayers);
       const note = $('#map-fallback');
       if (note && !isAdmin) note.hidden = false;
     }
@@ -274,19 +284,28 @@ function renderBusPositionLayers() {
         || (!state.mapAdmin[id] && state.activeView !== 'commuter')) continue;
     if (!map?.getSource('vehicle-points')) continue;
     const selectedRoutes = state.selectedRouteIds.length ? state.selectedRouteIds : [state.selectedRouteId].filter(Boolean);
-    const routeBuses = state.mapAdmin[id] ? state.buses : state.buses.filter((bus) => selectedRoutes.includes(String(bus.route_id)));
+    const routeBuses = state.mapAdmin[id] ? state.buses : (selectedRoutes.length ? state.buses.filter((bus) => selectedRoutes.includes(String(bus.route_id))) : state.buses);
     const bounds = map.getBounds?.();
     const visibleBuses = routeBuses.filter((bus) => {
+      let lon = Number(bus.lon);
+      let lat = Number(bus.lat);
       const geometry = state.routeGeometry[`${bus.route_id}:${bus.direction_id}`];
       if (geometry && Number(bus.speed_mps) > 0.5) {
         const eventAt = Date.parse(bus.updated_at || bus.event_ts || new Date().toISOString());
-        const age = Math.min(30, Math.max(0, (Date.now() - eventAt) / 1000));
-        const progress = Math.min(geometry.routeLength, Number(bus.progress_m || 0) + Number(bus.speed_mps) * age);
-        const [lon, lat] = routePosition(geometry, progress);
-        bus.lon = lon;
-        bus.lat = lat;
+        if (!Number.isNaN(eventAt)) {
+          const age = Math.min(30, Math.max(0, (Date.now() - eventAt) / 1000));
+          const progress = Math.min(geometry.routeLength, Number(bus.progress_m || 0) + Number(bus.speed_mps) * age);
+          const coords = routePosition(geometry, progress);
+          if (coords && Number.isFinite(coords[0]) && Number.isFinite(coords[1])) {
+            lon = coords[0];
+            lat = coords[1];
+            bus.lon = lon;
+            bus.lat = lat;
+          }
+        }
       }
-      return !bounds || bounds.contains([Number(bus.lon), Number(bus.lat)]);
+      const inBounds = !bounds || !bounds.contains || bounds.contains([lon, lat]);
+      return inBounds && Number.isFinite(lon) && Number.isFinite(lat);
     });
     map.getSource('vehicle-points').setData(dataFor(visibleBuses));
   }
@@ -313,7 +332,7 @@ function cacheRouteGeometry(geo) {
       cumulative.push(cumulative[cumulative.length-1] + Math.hypot(dx, dy));
     }
     state.routeGeometry[`${feature.properties.route_id}:${feature.properties.direction_id}`] = {
-      coordinates, cumulative, shapeLength: cumulative.at(-1), routeLength: Number(feature.properties.length_m || cumulative.at(-1)),
+      coordinates, cumulative, shapeLength: cumulative[cumulative.length - 1], routeLength: Number(feature.properties.length_m || cumulative[cumulative.length - 1]),
     };
   }
 }
@@ -401,16 +420,10 @@ async function connectVehicleStream() {
   if (state.socket && state.socket.readyState < WebSocket.CLOSING) state.socket.close();
   state.pendingVehicleSnapshot = null;
   const commuterRouteIds = state.selectedRouteIds.length ? state.selectedRouteIds : [state.selectedRouteId].filter(Boolean);
-  if (state.user?.role !== 'admin' && !commuterRouteIds.length) {
-    state.socket = null;
-    state.buses = [];
-    renderBusPositionLayers();
-    return;
-  }
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const params = new URLSearchParams();
   if (state.user?.role !== 'admin') {
-    params.set('route_ids', commuterRouteIds.join(','));
+    if (commuterRouteIds.length) params.set('route_ids', commuterRouteIds.join(','));
     params.set('region_id', state.regionId || 'whole_city');
   }
   else params.set('region_id', state.selectedRegion || 'whole_city');

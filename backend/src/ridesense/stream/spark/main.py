@@ -29,8 +29,27 @@ ALLOWED_LATENESS = int(os.getenv("ALLOWED_LATENESS_SECONDS", "15"))
 _LAST_INGEST_MONOTONIC: float | None = None
 _LGBM_MODEL = None
 _LGBM_MODEL_MTIME: float | None = None
-_OUTPUT_PRODUCER = Producer({"bootstrap.servers": BOOTSTRAP, "client.id": "bus-pulse-spark-output",
-                             "enable.idempotence": True, "acks": "all"})
+_OUTPUT_PRODUCER = Producer({
+    "bootstrap.servers": BOOTSTRAP,
+    "client.id": "bus-pulse-spark-output",
+    "enable.idempotence": True,
+    "acks": "all",
+    "queue.buffering.max.messages": 100000,
+    "queue.buffering.max.ms": 20,
+})
+
+
+def _safe_produce(producer: Producer, topic: str, key: str, value: bytes, retries: int = 5):
+    for attempt in range(retries):
+        try:
+            producer.produce(topic, key=key, value=value)
+            producer.poll(0)
+            return
+        except BufferError:
+            producer.poll(0.5)
+    producer.flush(2)
+    producer.produce(topic, key=key, value=value)
+    producer.poll(0)
 
 EVENT_SCHEMA = StructType([
     StructField("schema_version", IntegerType()), StructField("event_id", StringType()),
@@ -158,7 +177,9 @@ def write_windows(batch, batch_id: int):
                 cur.execute(
                     """INSERT INTO route_windows(window_start,route_id,occ_mean,occ_max,n_buses)
                        SELECT %s,%s,avg(occ_est_pct),max(occ_est_pct),count(DISTINCT vehicle_id)
-                       FROM occupancy_state WHERE route_id=%s AND event_ts >= %s AND event_ts < %s
+                       FROM occupancy_state
+                       WHERE route_id=%s AND event_ts >= %s AND event_ts < %s
+                       HAVING COUNT(*) > 0
                        ON CONFLICT (route_id,window_start) DO UPDATE SET occ_mean=EXCLUDED.occ_mean,
                        occ_max=EXCLUDED.occ_max,n_buses=EXCLUDED.n_buses""",
                     (start, r["route_id"], r["route_id"], start, end),
@@ -223,8 +244,8 @@ def write_windows(batch, batch_id: int):
                     "horizon_minutes": 5, "pred_pct": predicted, "model_version": model_version,
                     "contributions": contributions,
                 }
-                _OUTPUT_PRODUCER.produce("predictions", key=r["vehicle_id"],
-                                         value=json.dumps(prediction_event).encode())
+                _safe_produce(_OUTPUT_PRODUCER, "predictions", key=r["vehicle_id"],
+                              value=json.dumps(prediction_event).encode())
                 alert_types = []
                 if consecutive and float(previous[2]) > OCCUPANCY_THRESHOLD and float(r["occ_max"]) > OCCUPANCY_THRESHOLD:
                     alert_types.append(("OVERCROWD", "critical", float(r["occ_max"])))
@@ -252,8 +273,8 @@ def write_windows(batch, batch_id: int):
                         "pred_pct": predicted if kind == "PREDICTED_OVERCROWD" else None,
                         "threshold": OCCUPANCY_THRESHOLD,
                     }
-                    _OUTPUT_PRODUCER.produce("alerts", key=r["route_id"],
-                                             value=json.dumps(alert_event).encode())
+                    _safe_produce(_OUTPUT_PRODUCER, "alerts", key=r["route_id"],
+                                  value=json.dumps(alert_event).encode())
     _OUTPUT_PRODUCER.flush(5)
 
 
