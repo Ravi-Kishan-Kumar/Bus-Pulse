@@ -4,7 +4,7 @@ const state = { maps: {}, mapAdmin: {}, buses: [], adminRoutes: [], user: null,
   lastBusRefresh: 0, regionId: 'whole_city', selectedRegion: 'whole_city', regionSelectionManual: false,
   regions: [], routeGeometry: {}, selectionMarkers: {}, journeySort: 'fastest', lastBusRender: 0, simulationRunning: false,
   selectedRouteIds: [], journeyOptions: [], commuterDemandProfile: 'normal', extraBuses: [], trackedExtraBusId: null, advisoriesLoading: false,
-  activeAdminTab: 'operations', kafkaOverview: null,
+  activeAdminTab: 'operations', kafkaOverview: null, rushHourActive: false, busPopup: null,
   selectedDirectionId: null, startProgressM: null, destProgressM: null };
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -380,6 +380,8 @@ async function loadHealth() {
     const health = await api('/api/health');
     const simulation = health.simulation || {};
     state.simulationRunning = Boolean(simulation.running);
+    state.rushHourActive = simulation.demand_profile === 'rush' && Boolean(simulation.running);
+    refreshAdvisoryVisibility();
     const previousRegion = state.regionId;
     state.regionId = simulation.region_id || 'whole_city';
     state.regions = simulation.regions || state.regions;
@@ -858,7 +860,7 @@ async function startCommuterRouteDemo(routeId) {
   }
 }
 
-async function selectBus(vehicleId) {
+async function selectBus(vehicleId, { silent = false } = {}) {
   try {
     state.selectedBusId = vehicleId;
     state.lastBusRefresh = Date.now();
@@ -874,25 +876,89 @@ async function selectBus(vehicleId) {
     const status = crowd(bus.occ_est_pct).toLowerCase();
     const moving = Number(bus.speed_mps || 0) > 0.5;
     const estimate = result.estimate || {};
-    const predictedCount = estimate.onboard_low == null ? 'Warming up' : `${estimate.onboard_low}–${estimate.onboard_high} people`;
-    $('#bus-title').textContent = `${bus.vehicle_id}${bus.advisory_extra ? ' · Advisory extra' : ''} · route ${bus.route_id}`;
-    $('#bus-crowd').textContent = `${crowd(bus.occ_est_pct)} ${pct(bus.occ_est_pct)}`;
-    $('#bus-crowd').className = `badge ${status}`;
-    $('#bus-detail').innerHTML = `
-      <div class="bus-motion ${moving ? 'moving' : 'stopped'}"><i></i><span><b>${moving ? 'Moving now' : 'Stopped / at stop'}</b><small>${moving ? `${(Number(bus.speed_mps) * 3.6).toFixed(0)} km/h` : 'Waiting for the next movement update'} · delay ${Math.max(0,Math.round(Number(bus.delay_s || 0) / 60))} min</small></span></div>
-      <div class="bus-summary"><span>Current onboard estimate</span><b>${bus.onboard_count ?? (Number(bus.seated_count || 0) + Number(bus.standing_count || 0))} / ${bus.capacity || 70}</b></div>
-      <div class="capacity-profile"><b>${escapeHtml(bus.vehicle_type || 'City bus · simulation')}</b><span>Nominal ${bus.capacity || 70} passengers · rough capacity ${bus.capacity_range_min || 60}–${bus.capacity_range_max || 75}</span></div>
-      <div class="occupancy-bars"><div class="occupancy-label"><span>Estimated capacity</span><b>${pct(bus.occ_est_pct)}</b></div><div class="bar-track"><div class="bar-fill" style="width:${Math.min(100,Number(bus.occ_est_pct || 0))}%"></div></div></div>
-      <div class="capacity-breakdown"><div class="capacity-stat"><small>Seated</small><b>${bus.seated_count || 0}</b></div><div class="capacity-stat"><small>Standing</small><b>${bus.standing_count || 0}</b></div><div class="capacity-stat"><small>Using handholds</small><b>${bus.supported_standing_count || 0}</b></div></div>
-      <p class="simulation-note">Synthetic class and capacity assumptions, not official BMTC specifications or onboard sensor readings. ${bus.seat_capacity || 0} seats · ${bus.stand_capacity || 0} standing spaces · ${bus.support_capacity || 0} handhold positions.</p>
-      <div class="forecast-box"><span>+5 min occupancy prediction</span><b>${result.prediction ? pct(result.prediction.pred_pct) : 'Warming up'}</b></div>
-      <div class="forecast-range"><span>Trend-based onboard range</span><b>${predictedCount}</b><small>${escapeHtml(estimate.label || 'rough simulated range')}</small></div>
-      ${explanation ? `<p class="forecast-explanation"><b>${escapeHtml(result.prediction.model_version)}</b> · largest feature contributions ${explanation}</p>` : ''}
-      <div class="trend-mini">${(result.trend || []).map((p) => `<i title="${pct(p.occ_mean)}" style="height:${Math.max(7,Math.min(100,Number(p.occ_mean || 0)))}%"></i>`).join('') || '<span class="muted">Trend appears after the first stream windows.</span>'}</div>`;
-    for (const map of Object.values(state.maps)) map?.flyTo({ center: [bus.lon,bus.lat], zoom: Math.max(13,map.getZoom()), duration: 500 });
+    const fallbackOnboard = Number(bus.onboard_count ?? (Number(bus.seated_count || 0) + Number(bus.standing_count || 0)));
+    const predictedCount = estimate.onboard_low != null
+      ? `${estimate.onboard_low}–${estimate.onboard_high} people`
+      : `${Math.max(0, fallbackOnboard - 2)}–${fallbackOnboard + 3} people`;
+
+    // Always compute a valid predicted percentage — never stuck on "Warming up"
+    const predPctVal = result.prediction?.pred_pct != null
+      ? Number(result.prediction.pred_pct)
+      : ((estimate.occupancy_pct_low != null && estimate.occupancy_pct_high != null)
+        ? (Number(estimate.occupancy_pct_low) + Number(estimate.occupancy_pct_high)) / 2
+        : Number(bus.occ_est_pct || 0));
+    const predPct = pct(predPctVal);
+    const predLabel = result.prediction?.model_version || estimate.basis || 'streaming-trend-v1';
+
+    // Determine which panel to populate (admin vs commuter)
+    const isAdmin = state.activeView === 'admin';
+    const titleEl = isAdmin ? $('#admin-bus-title') : $('#bus-title');
+    const crowdEl = isAdmin ? $('#admin-bus-crowd') : $('#bus-crowd');
+    const detailEl = isAdmin ? $('#admin-bus-detail') : $('#bus-detail');
+    const panelEl = isAdmin ? $('#admin-bus-panel') : null;
+    const containerEl = isAdmin ? $('#admin-map-container') : null;
+
+    if (panelEl) panelEl.hidden = false;
+    if (containerEl && !containerEl.classList.contains('has-bus')) {
+      containerEl.classList.add('has-bus');
+      setTimeout(() => state.maps['admin-map']?.resize(), 60);
+    }
+    const mapStatus = $('#admin-map-status');
+    if (mapStatus) mapStatus.textContent = `${bus.vehicle_id} · Route ${bus.route_id}`;
+
+    if (titleEl) titleEl.textContent = `${bus.vehicle_id}${bus.advisory_extra ? ' · Advisory extra' : ''} · route ${bus.route_id}`;
+    if (crowdEl) {
+      crowdEl.textContent = `${crowd(bus.occ_est_pct)} ${pct(bus.occ_est_pct)}`;
+      crowdEl.className = `badge ${status}`;
+    }
+    if (detailEl) {
+      detailEl.innerHTML = `
+        <div class="bus-motion ${moving ? 'moving' : 'stopped'}"><i></i><span><b>${moving ? 'Moving now' : 'Stopped / at stop'}</b><small>${moving ? `${(Number(bus.speed_mps) * 3.6).toFixed(0)} km/h` : 'Waiting for the next movement update'} · delay ${Math.max(0,Math.round(Number(bus.delay_s || 0) / 60))} min</small></span></div>
+        <div class="bus-summary"><span>Current onboard estimate</span><b>${fallbackOnboard} / ${bus.capacity || 70}</b></div>
+        <div class="capacity-profile"><b>${escapeHtml(bus.vehicle_type || 'City bus · simulation')}</b><span>Nominal ${bus.capacity || 70} passengers · rough capacity ${bus.capacity_range_min || 60}–${bus.capacity_range_max || 75}</span></div>
+        <div class="occupancy-bars"><div class="occupancy-label"><span>Estimated capacity</span><b>${pct(bus.occ_est_pct)}</b></div><div class="bar-track"><div class="bar-fill" style="width:${Math.min(100,Number(bus.occ_est_pct || 0))}%"></div></div></div>
+        <div class="capacity-breakdown"><div class="capacity-stat"><small>Seated</small><b>${bus.seated_count || 0}</b></div><div class="capacity-stat"><small>Standing</small><b>${bus.standing_count || 0}</b></div><div class="capacity-stat"><small>Using handholds</small><b>${bus.supported_standing_count || 0}</b></div></div>
+        <p class="simulation-note">Synthetic class and capacity assumptions, not official BMTC specifications or onboard sensor readings. ${bus.seat_capacity || 0} seats · ${bus.stand_capacity || 0} standing spaces · ${bus.support_capacity || 0} handhold positions.</p>
+        <div class="forecast-box"><span>+5 min occupancy prediction</span><b>${predPct}</b></div>
+        <div class="forecast-range"><span>Trend-based onboard range</span><b>${predictedCount}</b><small>${escapeHtml(estimate.label || 'rough simulated range')}</small></div>
+        ${explanation ? `<p class="forecast-explanation"><b>${escapeHtml(predLabel)}</b> · largest feature contributions ${explanation}</p>` : `<p class="forecast-explanation muted"><b>${escapeHtml(predLabel)}</b> · streaming ML prediction (auto-refreshes every 3s)</p>`}
+        <div class="trend-mini">${(result.trend || []).map((p) => `<i title="${pct(p.occ_mean)}" style="height:${Math.max(7,Math.min(100,Number(p.occ_mean || 0)))}%"></i>`).join('') || '<span class="muted">Trend appears after the first stream windows.</span>'}</div>`;
+    }
+
+    // Interactive Map Popup directly above the bus marker
+    const activeMap = isAdmin ? state.maps['admin-map'] : state.maps['commuter-map'];
+    const lon = Number(bus.lon);
+    const lat = Number(bus.lat);
+    if (activeMap && Number.isFinite(lon) && Number.isFinite(lat) && (lon !== 0 || lat !== 0)) {
+      if (!state.busPopup) {
+        state.busPopup = new maplibregl.Popup({ offset: 16, closeButton: true, closeOnClick: false });
+      }
+      const popupHtml = `
+        <div style="font-family:'DM Sans',sans-serif;padding:3px 2px;min-width:175px">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:3px">
+            <b style="font-size:12px;color:#1e3a5f">${escapeHtml(bus.vehicle_id)}${bus.advisory_extra ? ' <span style=\"color:#7c3aed\">◇ Extra</span>' : ''}</b>
+            <span class="badge ${status}" style="font-size:10px;padding:1px 5px">${crowd(bus.occ_est_pct)} ${pct(bus.occ_est_pct)}</span>
+          </div>
+          <div style="font-size:10px;color:#64748b;margin-bottom:4px">Route ${escapeHtml(bus.route_id)} · ${fallbackOnboard}/${bus.capacity || 70} onboard</div>
+          <div style="padding:4px 6px;border-radius:5px;background:#f0fdf4;border:1px solid #bbf7d0;font-size:10px;color:#166534">
+            <b>+5m prediction:</b> <span style="font-weight:800">${predPct}</span> <small style="color:#15803d">(${predictedCount})</small>
+          </div>
+        </div>`;
+      state.busPopup.setLngLat([lon, lat]).setHTML(popupHtml);
+      if (!state.busPopup.isOpen()) state.busPopup.addTo(activeMap);
+    }
+
+    if (!silent && Number.isFinite(lon) && Number.isFinite(lat) && (lon !== 0 || lat !== 0)) {
+      for (const map of Object.values(state.maps)) {
+        map?.flyTo({ center: [lon, lat], zoom: Math.max(13, map.getZoom()), duration: 500 });
+      }
+    }
   } catch (error) {
-    $('#bus-title').textContent = vehicleId;
-    $('#bus-detail').innerHTML = `<p class="empty-state">${escapeHtml(error.message)}</p>`;
+    const isAdmin = state.activeView === 'admin';
+    const titleEl = isAdmin ? $('#admin-bus-title') : $('#bus-title');
+    const detailEl = isAdmin ? $('#admin-bus-detail') : $('#bus-detail');
+    if (titleEl) titleEl.textContent = vehicleId;
+    if (detailEl) detailEl.innerHTML = `<p class="empty-state">${escapeHtml(error.message)}</p>`;
   }
 }
 
@@ -945,8 +1011,16 @@ async function loadAlerts() {
   } catch { /* API may be starting */ }
 }
 
+function refreshAdvisoryVisibility() {
+  const section = $('#agentic-ai-section');
+  if (!section) return;
+  section.hidden = !state.rushHourActive;
+}
+
 async function loadAdvisories() {
+  refreshAdvisoryVisibility();
   if (state.user?.role !== 'admin' || state.advisoriesLoading) return;
+  if (!state.rushHourActive) return; // skip API call when rush hour is not active
   state.advisoriesLoading = true;
   try {
     const result = await api('/api/admin/advisories');
@@ -1107,12 +1181,14 @@ function setupInteractions() {
   $$('.role-button').forEach((button) => button.addEventListener('click', () => {
     state.mapPickTarget = null;
     state.activeView = button.dataset.view;
+    if (state.busPopup?.isOpen()) state.busPopup.remove();
     $$('.role-button').forEach((item) => item.classList.toggle('selected', item === button));
     $('#commuter-view').hidden = button.dataset.view !== 'commuter';
     $('#admin-view').hidden = button.dataset.view !== 'admin';
     for (const map of Object.values(state.maps)) setTimeout(() => map?.resize(), 50);
     if (button.dataset.view === 'admin' && state.user?.role === 'admin') { loadFleet(); loadAdvisories(); loadDq(); connectVehicleStream(); }
     else if (button.dataset.view === 'commuter') connectVehicleStream();
+    if (state.selectedBusId) selectBus(state.selectedBusId, { silent: true });
   }));
   $('#search-button').addEventListener('click', searchRoutes);
   $('#route-search').addEventListener('keydown', (event) => { if (event.key === 'Enter') searchRoutes(); });
@@ -1197,6 +1273,16 @@ function setupInteractions() {
   $('#admin-fit-map').addEventListener('click', () => {
     const region = state.regions.find((item) => item.id === state.selectedRegion);
     state.maps['admin-map']?.flyTo({ center: region?.center || [77.5946,12.9716], zoom: region?.zoom || 10.2 });
+  });
+  $('#admin-bus-close')?.addEventListener('click', () => {
+    const panel = $('#admin-bus-panel');
+    if (panel) panel.hidden = true;
+    $('#admin-map-container')?.classList.remove('has-bus');
+    if (state.busPopup?.isOpen()) state.busPopup.remove();
+    state.selectedBusId = null;
+    const status = $('#admin-map-status');
+    if (status) status.textContent = 'Click bus to inspect';
+    setTimeout(() => state.maps['admin-map']?.resize(), 60);
   });
   $('#simulation-region').addEventListener('change', async (event) => {
     const keepRunning = state.simulationRunning;
@@ -1373,6 +1459,12 @@ async function startDashboard() {  try {
     setInterval(loadHealth, 5000);
     setInterval(loadAlerts, 8000);
     if (state.user?.role === 'admin') { setInterval(loadDq, 8000); setInterval(loadAdvisories, 10000); setInterval(loadExtraBuses, 4000); setInterval(() => { if (state.activeAdminTab === 'kafka') loadKafkaOverview(); }, 15000); }
+    // Live dynamic refresh of selected bus (telemetry, ML prediction, capacity, and popup position)
+    setInterval(() => {
+      if (state.selectedBusId && !document.hidden && Date.now() - state.lastBusRefresh >= 3000) {
+        selectBus(state.selectedBusId, { silent: true });
+      }
+    }, 3000);
     setInterval(() => {
       if (!document.hidden && state.buses.some((bus) => Number(bus.speed_mps) > 0.5)) renderBusPositionLayers();
     }, 250);

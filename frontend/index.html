@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="/assets/styles.css">
   <link rel="stylesheet" href="/assets/components.css">
   <link rel="stylesheet" href="/assets/journey.css">
-  <link rel="stylesheet" href="/assets/overrides.css?v=20261109-kafka-tab">
+  <link rel="stylesheet" href="/assets/overrides.css?v=20261114-v4-admin-inspect">
 </head>
 <body>
   <header class="topbar">
@@ -92,14 +92,14 @@
           <aside class="admin-side">
             <section class="panel"><div class="panel-heading"><div><p class="eyebrow">STREAM HEALTH</p><h2>Pipeline status</h2></div><span id="pipeline-badge" class="badge neutral">Waiting</span></div><div class="metric-grid"><div class="metric"><small>Usable routes</small><b id="metric-routes">—</b></div><div class="metric"><small>Live simulated buses</small><b id="metric-buses">0</b></div><div class="metric"><small>Window latency</small><b>60 s</b></div><div class="metric"><small>Kafka mode</small><b>KRaft · 3 partitions</b></div></div><div class="dq-summary"><h3>Data quality</h3><div><span>Malformed</span><b id="dq-malformed">0</b></div><div><span>Duplicates</span><b id="dq-duplicates">0</b></div><div><span>Late events</span><b id="dq-late">0</b></div></div></section>
             <section class="panel operations-panel"><div class="panel-heading"><div><p class="eyebrow">OPERATIONS</p><h2>Active alerts</h2></div><span id="alert-count" class="count-pill">0 open</span></div><div id="admin-alerts" class="alert-list"><p class="empty-state">No active alerts. Solved alerts are cleared from this view.</p></div></section>
-            <section class="panel"><div class="panel-heading"><div><p class="eyebrow">AGENTIC AI</p><h2>Advisories</h2></div><span class="badge soft">Human approval</span></div><div id="admin-advisories" class="alert-list"><p class="empty-state">Unlock the administrator view to load evidence-backed recommendations.</p></div></section>
+            <section class="panel" id="agentic-ai-section" hidden><div class="panel-heading"><div><p class="eyebrow">AGENTIC AI</p><h2>Advisories</h2></div><span class="badge soft">Human approval</span></div><div id="admin-advisories" class="alert-list"><p class="empty-state">Unlock the administrator view to load evidence-backed recommendations.</p></div></section>
             <section class="panel"><div class="panel-heading"><div><p class="eyebrow">FLEET REINFORCEMENT</p><h2>Approved extra buses</h2></div><span id="extra-bus-count" class="count-pill">0 tracked</span></div>
               <div class="extra-bus-limit-bar"><div class="extra-bus-limit-label"><span>Reinforcement Radar</span><span id="extra-bus-limit-text">0 / 50 active</span></div><div class="extra-bus-limit-track"><div id="extra-bus-limit-fill" class="extra-bus-limit-fill" style="width:0%"></div></div></div>
               <div id="admin-extra-buses" class="extra-bus-list"><p class="empty-state">Approved advisory buses will appear here when their first Kafka snapshot arrives.</p></div>
               <p id="extra-bus-track-status" class="simulation-note">Choose Track to focus the live map on an extra bus.</p></section>
           </aside>
         </div>
-        <div class="admin-map-card panel"><div class="panel-heading"><div><p class="eyebrow">LIVE FLEET</p><h2>Bus locations</h2></div><button id="admin-fit-map" class="ghost-button">Center region</button></div><div id="admin-map" class="map admin-map"></div></div>
+        <div class="admin-map-card panel"><div class="panel-heading"><div><p class="eyebrow">LIVE FLEET</p><h2>Bus locations</h2></div><div style="display:flex;align-items:center;gap:8px"><span id="admin-map-status" class="count-pill">Click bus to inspect</span><button id="admin-fit-map" class="ghost-button">Center region</button></div></div><div class="admin-map-container" id="admin-map-container"><div id="admin-map" class="map admin-map"></div><section id="admin-bus-panel" class="panel admin-bus-panel" hidden><div class="panel-heading"><div><p class="eyebrow">SELECTED BUS</p><h2 id="admin-bus-title">Select a bus</h2></div><div style="display:flex;align-items:center;gap:6px"><span id="admin-bus-crowd" class="badge neutral">No live data</span><button id="admin-bus-close" class="ghost-button" style="padding:2px 8px;font-size:12px;line-height:1" title="Close inspector">✕</button></div></div><div id="admin-bus-detail" class="bus-detail"><p class="empty-state">Click a bus on the map to view its occupancy and +5 min prediction.</p></div></section></div></div>
       </div>
 
       <!-- KAFKA STREAMING ENGINE TAB -->
@@ -189,6 +189,6 @@
     </section>
   </main>
   <script src="https://unpkg.com/maplibre-gl@5.6.2/dist/maplibre-gl.js"></script>
-  <script type="module" src="/assets/app.js?v=20261109-extra-bus-fix-v2"></script>
+  <script type="module" src="/assets/app.js?v=20261114-v4-live-prediction"></script>
 </body>
 </html>

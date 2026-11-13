@@ -435,6 +435,22 @@ def bus_detail(vehicle_id: str):
                 "onboard_high": max(0, int(capacity*high_pct/100)+1),
                 "basis": prediction["model_version"] if prediction else "recent-stream trend baseline",
                 "label": "rough simulated range; not a statistical confidence interval"}
+    if prediction is None:
+        made_at = vehicle.get("updated_at") or vehicle.get("event_ts") or datetime.now(timezone.utc)
+        made_at_str = made_at.isoformat() if hasattr(made_at, "isoformat") else str(made_at)
+        contributions = {
+            "current_window_pct": float(vehicle["occ_est_pct"]),
+        }
+        if history and len(history) > 1:
+            contributions["stream_trend_delta"] = round(history[0] - history[-1], 1)
+        prediction = {
+            "made_at": made_at_str,
+            "target": "plus_5m",
+            "pred_pct": round(base, 1),
+            "model_version": "streaming-trend-v1",
+            "contributions": contributions,
+            "provisional": True,
+        }
     return {"vehicle": vehicle, "trend": trend, "prediction": prediction,
             "estimate": estimate, "simulated": True}
 

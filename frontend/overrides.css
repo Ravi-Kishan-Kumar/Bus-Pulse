@@ -225,3 +225,13 @@
 
 /* Advisory bus pulsing halo on map (extra beacon layer) */
 @keyframes advisory-pulse{0%,100%{opacity:.7}50%{opacity:.2}}
+
+/* Admin Selected Bus Panel & Map Inspector Layout */
+.admin-map-container{display:grid;grid-template-columns:1fr;gap:14px;margin-top:11px;align-items:start}
+.admin-map-container.has-bus{grid-template-columns:minmax(0,1.35fr) minmax(320px,1fr)}
+.admin-bus-panel{border:1px solid #e1e8f2;border-radius:10px;background:#ffffff;padding:14px;box-shadow:0 3px 14px #1225440d;animation:admin-bus-appear .22s ease-out}
+@keyframes admin-bus-appear{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+@media(max-width:980px){.admin-map-container.has-bus{grid-template-columns:1fr}}
+.maplibregl-popup-content{border-radius:8px;padding:8px 12px;box-shadow:0 3px 16px #0f172a26}
+.maplibregl-popup-close-button{padding:2px 6px;color:#94a3b8;font-size:14px}
+.maplibregl-popup-close-button:hover{color:#334155}
